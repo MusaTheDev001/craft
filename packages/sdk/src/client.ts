@@ -13,6 +13,7 @@ export type SubscriptionTier = 'free' | 'pro' | 'enterprise';
  * Configuration options for CraftClient.
  * @property baseUrl - The base URL of the CRAFT API (e.g., https://craft.app)
  * @property accessToken - Optional JWT access token for authenticated requests
+ * @property timeoutMs - Per-request timeout in milliseconds. Defaults to 30000.
  */
 export interface CraftClientOptions {
   baseUrl: string;
@@ -21,6 +22,8 @@ export interface CraftClientOptions {
   maxRetries?: number;
   /** Upper bound (ms) on a single Retry-After wait; longer waits fail fast instead. Defaults to 60000. */
   maxRetryDelayMs?: number;
+  /** Per-request timeout (ms); a stalled request is aborted and rejects with CraftApiError. Defaults to 30000. */
+  timeoutMs?: number;
 }
 
 export interface SignUpRequest {
@@ -133,6 +136,7 @@ export class CraftApiError extends Error {
 
 const DEFAULT_MAX_RETRIES = 2;
 const DEFAULT_MAX_RETRY_DELAY_MS = 60_000;
+const DEFAULT_TIMEOUT_MS = 30_000;
 /** Wait used when a 429 carries neither a Retry-After header nor a retryAfterMs body field. */
 const FALLBACK_RETRY_DELAY_MS = 1_000;
 
@@ -170,6 +174,7 @@ export class CraftClient {
   private accessToken?: string;
   private maxRetries: number;
   private maxRetryDelayMs: number;
+  private timeoutMs: number;
 
   /**
    * Creates a new CRAFT API client.
@@ -183,6 +188,7 @@ export class CraftClient {
     this.accessToken = options.accessToken;
     this.maxRetries = Math.max(0, options.maxRetries ?? DEFAULT_MAX_RETRIES);
     this.maxRetryDelayMs = options.maxRetryDelayMs ?? DEFAULT_MAX_RETRY_DELAY_MS;
+    this.timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   }
 
   /**
@@ -209,18 +215,33 @@ export class CraftClient {
    * 429 responses are retried up to `maxRetries` times, waiting for the duration the
    * server advertises via Retry-After; once retries are exhausted a CraftApiError
    * with code 'RATE_LIMITED' is thrown.
+   * Each attempt is bounded by `timeoutMs`; a stalled request is aborted and rejects
+   * with a CraftApiError (status 0, code 'TIMEOUT').
    */
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     for (let attempt = 0; ; attempt++) {
+      const controller = new AbortController();
+      let timedOut = false;
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.timeoutMs);
+
       let res: Response;
       try {
         res = await fetch(`${this.baseUrl}${path}`, {
           method,
           headers: this.headers(),
           body: body !== undefined ? JSON.stringify(body) : undefined,
+          signal: controller.signal,
         });
       } catch (error) {
+        if (timedOut) {
+          throw new CraftApiError(0, `Request timed out after ${this.timeoutMs}ms`, 'TIMEOUT');
+        }
         throw new CraftApiError(0, `Network request failed: ${error instanceof Error ? error.message : String(error)}`, undefined);
+      } finally {
+        clearTimeout(timer);
       }
 
       if (res.ok) return res.json() as Promise<T>;
@@ -260,6 +281,97 @@ export class CraftClient {
       if (retryAfterMs > this.maxRetryDelayMs) {
         throw new CraftApiError(
           429,
-          `Rate limit exceeded; server asked to retry after ${retryAfterMs}ms, which exceeds maxRetryDelayMs (${this.maxRetryDelayMs}ms)
+          `Rate limit exceeded; server asked to retry after ${retryAfterMs}ms which exceeds the ${this.maxRetryDelayMs}ms limit: ${message}`,
+          code ?? 'RATE_LIMITED',
+          retryAfterMs,
+        );
+      }
+      await sleep(retryAfterMs);
+    }
+  }
 
-/* … truncated 6022 chars — edit only what you need near the top … */
+  /**
+   * Registers a new user account.
+   * @param data - Sign-up details
+   * @returns The created user and session tokens
+   */
+  async signUp(data: SignUpRequest): Promise<AuthResponse> {
+    return this.request<AuthResponse>('POST', '/api/auth/signup', data);
+  }
+
+  /**
+   * Authenticates an existing user.
+   * @param data - Sign-in credentials
+   * @returns The user and session tokens
+   */
+  async signIn(data: SignInRequest): Promise<AuthResponse> {
+    return this.request<AuthResponse>('POST', '/api/auth/signin', data);
+  }
+
+  /**
+   * Fetches the current user's profile.
+   * @returns The authenticated user's profile
+   */
+  async getProfile(): Promise<UserProfile> {
+    return this.request<UserProfile>('GET', '/api/auth/profile');
+  }
+
+  /**
+   * Lists available templates.
+   * @param options - Optional filtering and pagination
+   * @returns A page of templates
+   */
+  async listTemplates(options: TemplateListOptions = {}): Promise<TemplateListResponse> {
+    const params = new URLSearchParams();
+    if (options.category) params.set('category', options.category);
+    if (options.search) params.set('search', options.search);
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.offset !== undefined) params.set('offset', String(options.offset));
+    const query = params.toString();
+    return this.request<TemplateListResponse>('GET', `/api/templates${query ? `?${query}` : ''}`);
+  }
+
+  /**
+   * Fetches a single template by id.
+   * @param id - Template id
+   * @returns The template
+   */
+  async getTemplate(id: string): Promise<Template> {
+    return this.request<Template>('GET', `/api/templates/${encodePathId(id)}`);
+  }
+
+  /**
+   * Creates a Stripe checkout session for a subscription.
+   * @param data - Checkout details
+   * @returns The checkout session id and redirect URL
+   */
+  async createCheckout(data: CheckoutRequest): Promise<CheckoutResponse> {
+    return this.request<CheckoutResponse>('POST', '/api/payments/checkout', data);
+  }
+
+  /**
+   * Fetches the current subscription status.
+   * @returns The subscription status
+   */
+  async getSubscriptionStatus(): Promise<SubscriptionStatus> {
+    return this.request<SubscriptionStatus>('GET', '/api/payments/subscription');
+  }
+
+  /**
+   * Fetches analytics for a deployment.
+   * @param deploymentId - Deployment id
+   * @returns Analytics records and summary
+   */
+  async getDeploymentAnalytics(deploymentId: string): Promise<DeploymentAnalytics> {
+    return this.request<DeploymentAnalytics>('GET', `/api/deployments/${encodePathId(deploymentId)}/analytics`);
+  }
+
+  /**
+   * Fetches the health of a deployment.
+   * @param deploymentId - Deployment id
+   * @returns The deployment health snapshot
+   */
+  async getDeploymentHealth(deploymentId: string): Promise<DeploymentHealth> {
+    return this.request<DeploymentHealth>('GET', `/api/deployments/${encodePathId(deploymentId)}/health`);
+  }
+}
