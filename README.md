@@ -2001,3 +2001,8 @@ CRAFT wouldn't be possible without these amazing projects and communities:
 
 ## Automated PR Test
 This change is added by GitHub Copilot exercise.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1434 -->
+- #1434: Replace the Select-Then-Insert Profile Sync With an Atomic Upsert in Cross-Region Auth Utilities
