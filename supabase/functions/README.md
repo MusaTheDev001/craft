@@ -2,6 +2,16 @@
 
 This directory contains Supabase Edge Functions for the CRAFT platform, including cross-region authentication services, health checks, and intelligent routing.
 
+## Dependency Pinning
+
+Edge functions import `@supabase/supabase-js` from esm.sh. To avoid supply-chain surprises from floating major tags, the import is pinned to an exact version that matches `apps/backend/package.json`:
+
+```
+https://esm.sh/@supabase/supabase-js@2.49.4
+```
+
+This pinned URL is recorded in `import_map.json` (as the `@supabase/supabase-js` specifier) so all functions resolve the same exact version. When bumping `@supabase/supabase-js` in `apps/backend/package.json`, update both `import_map.json` and the import in `regional-auth/auth-utils.ts` to the same exact version.
+
 ## Directory Structure
 
 ```
@@ -280,161 +290,6 @@ syncUserProfileAcrossRegions(userId: string, sourceRegion: string): Promise<Sync
 logAuthEvent(userId: string | null, eventType: string, region: string, requestId: string): Promise<void>
 ```
 
-### Consistency Validators (`regional-auth/consistency-validators.ts`)
+### Consistency Validators (`regional-auth/consistency-vali
 
-Ensures auth state consistency across regions:
-
-```typescript
-// Check if user profiles are consistent
-validateUserStateConsistency(userId: string): Promise<ConsistencyCheckResult>
-
-// Check if tokens are valid in all regions
-validateTokenConsistency(userId: string, token: string): Promise<TokenValidation>
-
-// Sync user profile to all regions
-syncUserProfileToAllRegions(userId: string, sourceRegion: string): Promise<SyncResult>
-
-// Repair inconsistent state
-repairUserStateConsistency(userId: string, authorityRegion?: string): Promise<RepairResult>
-
-// Validate audit log consistency
-validateAuditLogConsistency(userId: string, timeWindowMinutes?: number): Promise<AuditValidation>
-```
-
-## Configuration
-
-### Environment Variables
-
-Each edge function requires these environment variables (set per-region):
-
-```bash
-# Regional Supabase URLs
-SUPABASE_URL_US_EAST=https://project-us-east.supabase.co
-SUPABASE_URL_EU_WEST=https://project-eu-west.supabase.co
-SUPABASE_URL_AP_SOUTHEAST=https://project-ap-southeast.supabase.co
-
-# Anon keys
-SUPABASE_ANON_KEY_US_EAST=...
-SUPABASE_ANON_KEY_EU_WEST=...
-SUPABASE_ANON_KEY_AP_SOUTHEAST=...
-
-# Service role keys
-SUPABASE_SERVICE_ROLE_KEY_US_EAST=...
-SUPABASE_SERVICE_ROLE_KEY_EU_WEST=...
-SUPABASE_SERVICE_ROLE_KEY_AP_SOUTHEAST=...
-
-# Edge function URLs for routing
-EDGE_FUNCTION_URL_US_EAST=https://project-us-east.functions.supabase.co
-EDGE_FUNCTION_URL_EU_WEST=https://project-eu-west.functions.supabase.co
-EDGE_FUNCTION_URL_AP_SOUTHEAST=https://project-ap-southeast.functions.supabase.co
-
-# CORS configuration
-ALLOWED_ORIGINS=https://app.example.com,https://staging.example.com
-
-# Regional Router health probe timeout (milliseconds, default: 2000)
-REGION_HEALTH_PROBE_TIMEOUT_MS=2000
-```
-
-### Database Schema
-
-New table `auth_audit_logs` for cross-region audit trail:
-
-```sql
-CREATE TABLE auth_audit_logs (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  user_id UUID REFERENCES auth.users(id) ON DELETE SET NULL,
-  event_type TEXT NOT NULL,  -- signin, signup, refresh, logout, failure
-  region TEXT NOT NULL,       -- us-east, eu-west, ap-southeast
-  request_id TEXT UNIQUE NOT NULL,
-  details JSONB,
-  created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
-);
-```
-
-## Testing
-
-### Unit Tests
-
-```bash
-# Run all tests
-npm test -- supabase/functions
-
-# Run specific test suite
-npm test -- supabase/functions/regional-auth/regional-auth.test.ts
-npm test -- supabase/functions/regional-health-check/health-check.test.ts
-```
-
-### Manual Testing
-
-```bash
-# Check health of all regions
-curl https://api.example.com/functions/v1/regional-health-check | jq
-
-# Test sign-up
-curl https://api.example.com/functions/v1/regional-auth-sign-up \
-  -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com", "password": "Test123"}'
-
-# Test sign-in
-curl https://api.example.com/functions/v1/regional-auth-sign-in \
-  -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com", "password": "Test123"}'
-
-# Force routing to specific region
-curl https://api.example.com/functions/v1/regional-auth-sign-in \
-  -H "x-region-override: eu-west" \
-  -H "Content-Type: application/json" \
-  -d '{"email": "test@example.com", "password": "Test123"}'
-```
-
-## Deployment
-
-See [Cross-Region Deployment Guide](../docs/cross-region-deployment-guide.md) for detailed deployment instructions.
-
-## Monitoring
-
-### Health Checks
-
-Regularly monitor edge function health:
-
-```bash
-# Check all regions
-watch -n 10 'curl -s https://api.example.com/functions/v1/regional-health-check | jq'
-```
-
-### Audit Logs
-
-Query auth events for analysis:
-
-```sql
-SELECT * FROM auth_audit_logs
-WHERE created_at > NOW() - INTERVAL '1 hour'
-ORDER BY created_at DESC;
-```
-
-### Performance Metrics
-
-Track response times and latency by region:
-
-```sql
-SELECT 
-  region,
-  event_type,
-  COUNT(*) as count,
-  AVG((details->>'processingTime')::numeric) as avg_time,
-  MAX((details->>'processingTime')::numeric) as max_time
-FROM auth_audit_logs
-WHERE created_at > NOW() - INTERVAL '1 hour'
-GROUP BY region, event_type;
-```
-
-## Troubleshooting
-
-See [Cross-Region Auth Deployment](../docs/cross-region-auth-deployment.md#troubleshooting) for troubleshooting guide.
-
-## Related Documentation
-
-- [Cross-Region Auth Deployment](../docs/cross-region-auth-deployment.md)
-- [Integration Guide](../docs/cross-region-auth-integration-guide.md)
-- [Deployment Guide](../docs/cross-region-deployment-guide.md)
-- [Supabase Edge Functions Docs](https://supabase.com/docs/guides/functions)
+/* … truncated 4498 chars — edit only what you need near the top … */
