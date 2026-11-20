@@ -42,9 +42,17 @@ export type CircuitState = 'CLOSED' | 'OPEN' | 'HALF_OPEN';
 export interface CircuitBreakerConfig {
   /** Human-readable name used in error messages. */
   name: string;
-  /** Number of consecutive failures before opening. Default: 5 */
+  /**
+   * Number of consecutive failures before opening. Default: 5
+   * Must be a positive integer (>= 1). Non-integer or non-positive values
+   * throw a `RangeError` at construction.
+   */
   failureThreshold?: number;
-  /** How long (ms) to wait in OPEN before allowing a probe. Default: 30_000 */
+  /**
+   * How long (ms) to wait in OPEN before allowing a probe. Default: 30_000
+   * Must be a positive integer (>= 1). Non-integer or non-positive values
+   * throw a `RangeError` at construction.
+   */
   resetTimeoutMs?: number;
   /** Injected clock — override in tests. Default: Date.now */
   now?: () => number;
@@ -75,6 +83,10 @@ export class CircuitBreaker {
     this.name = config.name;
     this.failureThreshold = config.failureThreshold ?? 5;
     this.resetTimeoutMs = config.resetTimeoutMs ?? 30_000;
+
+    assertPositiveInteger(this.failureThreshold, 'failureThreshold');
+    assertPositiveInteger(this.resetTimeoutMs, 'resetTimeoutMs');
+
     this.now = config.now ?? Date.now;
     this.onStateChange = config.onStateChange;
   }
@@ -186,5 +198,17 @@ export class CircuitBreaker {
     const from = this.state;
     this.state = to;
     this.onStateChange?.(this.name, from, to, metadata);
+  }
+}
+
+/**
+ * Assert that `value` is a positive integer (>= 1).
+ * Throws a `RangeError` for non-integer, non-positive, or `NaN` values.
+ */
+function assertPositiveInteger(value: number, field: string): void {
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new RangeError(
+      `CircuitBreaker config "${field}" must be a positive integer, received ${value}`,
+    );
   }
 }
