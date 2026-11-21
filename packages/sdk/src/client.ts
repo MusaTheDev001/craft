@@ -10,6 +10,20 @@ export type { DeploymentStatusType } from '@craft/types';
 export type SubscriptionTier = 'free' | 'pro' | 'enterprise';
 
 /**
+ * Known Stripe subscription statuses.
+ * @see https://stripe.com/docs/api/subscriptions/object#subscription_object-status
+ */
+export type SubscriptionStatusType =
+  | 'active'
+  | 'canceled'
+  | 'incomplete'
+  | 'incomplete_expired'
+  | 'past_due'
+  | 'paused'
+  | 'trialing'
+  | 'unpaid';
+
+/**
  * Configuration options for CraftClient.
  * @property baseUrl - The base URL of the CRAFT API (e.g., https://craft.app)
  * @property accessToken - Optional JWT access token for authenticated requests
@@ -44,7 +58,12 @@ export interface UserProfile {
   email: string;
   fullName: string;
   subscriptionTier: SubscriptionTier;
-  createdAt: Date;
+  /**
+   * Account creation timestamp as an ISO 8601 string (e.g. `2024-01-15T10:30:00.000Z`).
+   * This is the raw value from the parsed JSON response — not a `Date` instance.
+   * Use `new Date(profile.createdAt)` if you need a `Date`.
+   */
+  createdAt: string;
   githubConnected: boolean;
   githubUsername: string | null;
 }
@@ -60,18 +79,17 @@ export interface Template {
   thumbnailUrl?: string;
 }
 
-export interface TemplateListResponse {
-  templates: Template[];
-  total: number;
-  limit: number;
-  offset: number;
-}
+/**
+ * Response shape of GET /api/templates.
+ *
+ * The route returns a plain array from `templateService.listTemplates`; it does
+ * not paginate, so there is no `total`/`limit`/`offset` envelope.
+ */
+export type TemplateListResponse = Template[];
 
 export interface TemplateListOptions {
   category?: string;
   search?: string;
-  limit?: number;
-  offset?: number;
 }
 
 export interface CheckoutRequest {
@@ -87,8 +105,8 @@ export interface CheckoutResponse {
 
 export interface SubscriptionStatus {
   subscriptionId: string;
-  status: string;
-  tier: string;
+  status: SubscriptionStatusType;
+  tier: SubscriptionTier;
   currentPeriodEnd: string;
   cancelAtPeriodEnd: boolean;
 }
@@ -210,6 +228,11 @@ export class CraftClient {
    * 429 responses are retried up to `maxRetries` times, waiting for the duration the
    * server advertises via Retry-After; once retries are exhausted a CraftApiError
    * with code 'RATE_LIMITED' is thrown.
+   *
+   * On a 2xx response the body is parsed as JSON. A 204 No Content (or any empty
+   * body) resolves to `undefined`. If the body is not valid JSON (e.g. an HTML page
+   * served by a proxy), a CraftApiError carrying the response status is thrown
+   * instead of a raw SyntaxError, so every failure surfaces as CraftApiError.
    */
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     for (let attempt = 0; ; attempt++) {
@@ -224,7 +247,20 @@ export class CraftClient {
         throw new CraftApiError(0, `Network request failed: ${error instanceof Error ? error.message : String(error)}`, undefined);
       }
 
-      if (res.ok) return res.json() as Promise<T>;
+      if (res.ok) {
+        if (res.status === 204) return undefined as T;
+        const text = await res.text();
+        if (text.trim() === '') return undefined as T;
+        try {
+          return JSON.parse(text) as T;
+        } catch {
+          throw new CraftApiError(
+            res.status,
+            `Expected JSON response but received non-JSON body (status ${res.status})`,
+            'INVALID_RESPONSE_BODY',
+          );
+        }
+      }
 
       const text = await res.text().catch(() => res.statusText);
       let message = text;
@@ -235,32 +271,124 @@ export class CraftClient {
         if (errorBody.message && typeof errorBody.message === 'string') {
           message = errorBody.message;
         } else if (errorBody.error && typeof errorBody.error === 'string') {
-          // Rate-limit middleware responses use `error` rather than `message`.
           message = errorBody.error;
         }
         if (errorBody.code && typeof errorBody.code === 'string') {
           code = errorBody.code;
         }
       } catch {
-        // text is not JSON; use raw text as message
+        // Non-JSON error body; fall back to raw text.
       }
 
-      if (res.status !== 429) {
-        throw new CraftApiError(res.status, message, code);
+      if (res.status === 429 && attempt < this.maxRetries) {
+        const retryAfterMs = resolveRetryAfterMs(res, errorBody);
+        if (retryAfterMs <= this.maxRetryDelayMs) {
+          await sleep(retryAfterMs);
+          continue;
+        }
       }
 
-      const retryAfterMs = resolveRetryAfterMs(res, errorBody);
-      if (attempt >= this.maxRetries) {
+      if (res.status === 429) {
         throw new CraftApiError(
-          429,
-          `Rate limit exceeded; gave up after ${attempt} ${attempt === 1 ? 'retry' : 'retries'} (server asked to retry after ${retryAfterMs}ms): ${message}`,
+          res.status,
+          message || 'Rate limit exceeded',
           code ?? 'RATE_LIMITED',
-          retryAfterMs,
+          resolveRetryAfterMs(res, errorBody),
         );
       }
-      if (retryAfterMs > this.maxRetryDelayMs) {
-        throw new CraftApiError(
-          429,
-          `Rate limit exceeded; server asked to retry after ${retryAfterMs}ms, which exceeds maxRetryDelayMs (${this.maxRetryDelayMs}ms)
 
-/* … truncated 6022 chars — edit only what you need near the top … */
+      throw new CraftApiError(res.status, message || `Request failed with status ${res.status}`, code);
+    }
+  }
+
+  /**
+   * Signs up a new user.
+   * @param data - Sign-up credentials and profile info
+   * @returns Auth response with user and session tokens
+   */
+  async signUp(data: SignUpRequest): Promise<AuthResponse> {
+    return this.request<AuthResponse>('POST', '/api/auth/signup', data);
+  }
+
+  /**
+   * Signs in an existing user.
+   * @param data - Sign-in credentials
+   * @returns Auth response with user and session tokens
+   */
+  async signIn(data: SignInRequest): Promise<AuthResponse> {
+    return this.request<AuthResponse>('POST', '/api/auth/signin', data);
+  }
+
+  /**
+   * Signs out the current user and clears the stored access token.
+   */
+  async signOut(): Promise<void> {
+    await this.request<void>('POST', '/api/auth/signout');
+    this.clearAccessToken();
+  }
+
+  /**
+   * Fetches the current user's profile.
+   * @returns User profile
+   */
+  async getProfile(): Promise<UserProfile> {
+    return this.request<UserProfile>('GET', '/api/auth/profile');
+  }
+
+  /**
+   * Lists available templates.
+   * @param options - Optional category/search filters
+   * @returns Array of templates
+   */
+  async listTemplates(options?: TemplateListOptions): Promise<TemplateListResponse> {
+    const params = new URLSearchParams();
+    if (options?.category) params.set('category', options.category);
+    if (options?.search) params.set('search', options.search);
+    const query = params.toString();
+    return this.request<TemplateListResponse>('GET', `/api/templates${query ? `?${query}` : ''}`);
+  }
+
+  /**
+   * Fetches a single template by ID.
+   * @param id - Template ID
+   * @returns Template
+   */
+  async getTemplate(id: string): Promise<Template> {
+    return this.request<Template>('GET', `/api/templates/${encodeURIComponent(id)}`);
+  }
+
+  /**
+   * Creates a Stripe checkout session for a subscription.
+   * @param data - Checkout request details
+   * @returns Checkout session ID and URL
+   */
+  async createCheckoutSession(data: CheckoutRequest): Promise<CheckoutResponse> {
+    return this.request<CheckoutResponse>('POST', '/api/payments/checkout', data);
+  }
+
+  /**
+   * Fetches the current subscription status.
+   * @returns Subscription status
+   */
+  async getSubscriptionStatus(): Promise<SubscriptionStatus> {
+    return this.request<SubscriptionStatus>('GET', '/api/payments/subscription');
+  }
+
+  /**
+   * Fetches deployment analytics.
+   * @param deploymentId - Deployment ID
+   * @returns Analytics data and summary
+   */
+  async getDeploymentAnalytics(deploymentId: string): Promise<DeploymentAnalytics> {
+    return this.request<DeploymentAnalytics>('GET', `/api/deployments/${encodeURIComponent(deploymentId)}/analytics`);
+  }
+
+  /**
+   * Fetches deployment health.
+   * @param deploymentId - Deployment ID
+   * @returns Health status
+   */
+  async getDeploymentHealth(deploymentId: string): Promise<DeploymentHealth> {
+    return this.request<DeploymentHealth>('GET', `/api/deployments/${encodeURIComponent(deploymentId)}/health`);
+  }
+}

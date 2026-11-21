@@ -21,6 +21,7 @@ export const RETENTION_POLICY = {
     },
 } as const;
 
+// "The deployment lifecycle retention windows must satisfy: analyticsPurgeDays >= tombstonedDeploymentPurgeDays and auditLogCompactionDays >= tombstonedDeploymentPurgeDays."
 export const RETENTION_WINDOW_RELATIONSHIP =
     'The deployment lifecycle retention windows must satisfy: analyticsPurgeDays >= tombstonedDeploymentPurgeDays and auditLogCompactionDays >= tombstonedDeploymentPurgeDays.';
 

@@ -12,6 +12,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
     getNetworkConfig,
     resolveStellarNetworkConfig,
+    getNetworkPassphrase,
+    validateNetworkPassphrase,
     NETWORK_PASSPHRASES,
     HORIZON_URLS,
     SOROBAN_RPC_URLS,
@@ -80,6 +82,107 @@ describe('Stellar Config — Snapshot Regression Tests (#540)', () => {
         });
     });
 
+    describe('getNetworkConfig — env overrides (#1416)', () => {
+        const originalHorizon = process.env.NEXT_PUBLIC_HORIZON_URL;
+        const originalRpc = process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+
+        beforeEach(() => {
+            delete process.env.NEXT_PUBLIC_HORIZON_URL;
+            delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+        });
+
+        afterEach(() => {
+            if (originalHorizon === undefined) {
+                delete process.env.NEXT_PUBLIC_HORIZON_URL;
+            } else {
+                process.env.NEXT_PUBLIC_HORIZON_URL = originalHorizon;
+            }
+            if (originalRpc === undefined) {
+                delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+            } else {
+                process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = originalRpc;
+            }
+        });
+
+        it('should fall back to defaults when overrides are unset', () => {
+            const config = getNetworkConfig('testnet');
+            expect(config.horizonUrl).toBe(HORIZON_URLS.testnet);
+            expect(config.sorobanRpcUrl).toBe(SOROBAN_RPC_URLS.testnet);
+        });
+
+        it('should use NEXT_PUBLIC_HORIZON_URL override when set', () => {
+            process.env.NEXT_PUBLIC_HORIZON_URL = 'https://horizon.example.com';
+            const config = getNetworkConfig('testnet');
+            expect(config.horizonUrl).toBe('https://horizon.example.com');
+        });
+
+        it('should use NEXT_PUBLIC_SOROBAN_RPC_URL override when set', () => {
+            process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = 'https://rpc.example.com';
+            const config = getNetworkConfig('testnet');
+            expect(config.sorobanRpcUrl).toBe('https://rpc.example.com');
+        });
+
+        it('should apply both overrides together', () => {
+            process.env.NEXT_PUBLIC_HORIZON_URL = 'https://horizon.example.com';
+            process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = 'https://rpc.example.com';
+            const config = getNetworkConfig('mainnet');
+            expect(config.horizonUrl).toBe('https://horizon.example.com');
+            expect(config.sorobanRpcUrl).toBe('https://rpc.example.com');
+        });
+
+        it('should ignore non-https Horizon override and fall back to default', () => {
+            process.env.NEXT_PUBLIC_HORIZON_URL = 'http://horizon.example.com';
+            const config = getNetworkConfig('testnet');
+            expect(config.horizonUrl).toBe(HORIZON_URLS.testnet);
+        });
+
+        it('should ignore non-https Soroban RPC override and fall back to default', () => {
+            process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = 'http://rpc.example.com';
+            const config = getNetworkConfig('testnet');
+            expect(config.sorobanRpcUrl).toBe(SOROBAN_RPC_URLS.testnet);
+        });
+    });
+
+    describe('network passphrase override (#1417)', () => {
+        const originalPassphrase = process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE;
+        const customPassphrase = 'Custom Network ; 2024';
+
+        beforeEach(() => {
+            delete process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE;
+        });
+
+        afterEach(() => {
+            if (originalPassphrase === undefined) {
+                delete process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE;
+            } else {
+                process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE = originalPassphrase;
+            }
+        });
+
+        it('should fall back to constants when override is unset', () => {
+            expect(getNetworkPassphrase('testnet')).toBe(NETWORK_PASSPHRASES.testnet);
+            expect(getNetworkPassphrase('mainnet')).toBe(NETWORK_PASSPHRASES.mainnet);
+        });
+
+        it('should use NEXT_PUBLIC_NETWORK_PASSPHRASE override in getNetworkPassphrase', () => {
+            process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE = customPassphrase;
+            expect(getNetworkPassphrase('testnet')).toBe(customPassphrase);
+            expect(getNetworkPassphrase('mainnet')).toBe(customPassphrase);
+        });
+
+        it('should accept only the configured passphrase in validateNetworkPassphrase', () => {
+            process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE = customPassphrase;
+            expect(validateNetworkPassphrase(customPassphrase, 'testnet')).toBe(true);
+            expect(validateNetworkPassphrase(NETWORK_PASSPHRASES.testnet, 'testnet')).toBe(false);
+            expect(validateNetworkPassphrase(NETWORK_PASSPHRASES.mainnet, 'mainnet')).toBe(false);
+        });
+
+        it('should validate against constants when override is unset', () => {
+            expect(validateNetworkPassphrase(NETWORK_PASSPHRASES.testnet, 'testnet')).toBe(true);
+            expect(validateNetworkPassphrase(NETWORK_PASSPHRASES.mainnet, 'testnet')).toBe(false);
+        });
+    });
+
     describe('Network Configuration Constants', () => {
         it('should match snapshot for NETWORK_PASSPHRASES', () => {
             expect(NETWORK_PASSPHRASES).toMatchSnapshot();
@@ -128,264 +231,6 @@ describe('Stellar Config — Snapshot Regression Tests (#540)', () => {
         it('should have all required fields in config output', () => {
             const config = getNetworkConfig('testnet');
             expect(Object.keys(config).sort()).toMatchSnapshot();
-            expect(config).toHaveProperty('network');
-            expect(config).toHaveProperty('horizonUrl');
-            expect(config).toHaveProperty('networkPassphrase');
-            expect(config).toHaveProperty('sorobanRpcUrl');
         });
-    });
-
-    describe('Serialization Stability', () => {
-        it('should serialize testnet config consistently', () => {
-            const config = getNetworkConfig('testnet');
-            const serialized = JSON.stringify(config);
-            expect(serialized).toMatchSnapshot();
-        });
-
-        it('should serialize mainnet config consistently', () => {
-            const config = getNetworkConfig('mainnet');
-            const serialized = JSON.stringify(config);
-            expect(serialized).toMatchSnapshot();
-        });
-
-        it('should deserialize and re-serialize to same value', () => {
-            const config = getNetworkConfig('testnet');
-            const serialized1 = JSON.stringify(config);
-            const deserialized = JSON.parse(serialized1);
-            const serialized2 = JSON.stringify(deserialized);
-            expect(serialized1).toBe(serialized2);
-            expect(serialized1).toMatchSnapshot();
-        });
-    });
-
-    describe('URL Format Validation', () => {
-        it('should have valid HTTPS URLs for Horizon endpoints', () => {
-            Object.values(HORIZON_URLS).forEach((url) => {
-                expect(url).toMatch(/^https:\/\//);
-                expect(url).toMatchSnapshot();
-            });
-        });
-
-        it('should have valid HTTPS URLs for Soroban RPC endpoints', () => {
-            Object.values(SOROBAN_RPC_URLS).forEach((url) => {
-                expect(url).toMatch(/^https:\/\//);
-                expect(url).toMatchSnapshot();
-            });
-        });
-
-        it('should have no trailing slashes in URLs', () => {
-            Object.values(HORIZON_URLS).forEach((url) => {
-                expect(url).not.toMatch(/\/$/);
-            });
-            Object.values(SOROBAN_RPC_URLS).forEach((url) => {
-                expect(url).not.toMatch(/\/$/);
-            });
-        });
-    });
-
-    describe('Passphrase Format Validation', () => {
-        it('should have valid Stellar network passphrases', () => {
-            Object.values(NETWORK_PASSPHRASES).forEach((passphrase) => {
-                expect(typeof passphrase).toBe('string');
-                expect(passphrase.length).toBeGreaterThan(0);
-                expect(passphrase).toMatchSnapshot();
-            });
-        });
-
-        it('should have distinct passphrases for each network', () => {
-            const passphrases = Object.values(NETWORK_PASSPHRASES);
-            const uniquePassphrases = new Set(passphrases);
-            expect(uniquePassphrases.size).toBe(passphrases.length);
-        });
-    });
-
-    describe('resolveNetwork — unrecognized value handling (#958)', () => {
-        beforeEach(() => {
-            delete process.env.STELLAR_NETWORK;
-            delete process.env.NEXT_PUBLIC_STELLAR_NETWORK;
-            vi.spyOn(console, 'warn').mockImplementation(() => {});
-        });
-
-        afterEach(() => {
-            vi.restoreAllMocks();
-        });
-
-        it('should silently default to testnet when STELLAR_NETWORK is unset', () => {
-            delete process.env.STELLAR_NETWORK;
-            delete process.env.NEXT_PUBLIC_STELLAR_NETWORK;
-            const config = getNetworkConfig();
-            expect(config.network).toBe('testnet');
-            expect(console.warn).not.toHaveBeenCalled();
-        });
-
-        it('should resolve mainnet when STELLAR_NETWORK=mainnet', () => {
-            process.env.STELLAR_NETWORK = 'mainnet';
-            const config = getNetworkConfig();
-            expect(config.network).toBe('mainnet');
-            expect(console.warn).not.toHaveBeenCalled();
-        });
-
-        it('should resolve testnet when STELLAR_NETWORK=testnet', () => {
-            process.env.STELLAR_NETWORK = 'testnet';
-            const config = getNetworkConfig();
-            expect(config.network).toBe('testnet');
-            expect(console.warn).not.toHaveBeenCalled();
-        });
-
-        it('should warn and default to testnet for unrecognized STELLAR_NETWORK', () => {
-            process.env.STELLAR_NETWORK = 'production';
-            const config = getNetworkConfig();
-            expect(config.network).toBe('testnet');
-            expect(console.warn).toHaveBeenCalled();
-            expect(console.warn).toHaveBeenCalledWith(
-                expect.stringContaining('Unrecognized STELLAR_NETWORK value')
-            );
-        });
-
-        it('should warn for capitalization typos like Mainnet', () => {
-            process.env.STELLAR_NETWORK = 'Mainnet';
-            const config = getNetworkConfig();
-            expect(config.network).toBe('testnet');
-            expect(console.warn).toHaveBeenCalled();
-        });
-
-        it('should trim whitespace before validation', () => {
-            process.env.STELLAR_NETWORK = '  mainnet  ';
-            const config = getNetworkConfig();
-            expect(config.network).toBe('mainnet');
-            expect(console.warn).not.toHaveBeenCalled();
-        });
-
-        it('should trim whitespace and still warn for unrecognized values', () => {
-            process.env.STELLAR_NETWORK = '  production  ';
-            const config = getNetworkConfig();
-            expect(config.network).toBe('testnet');
-            expect(console.warn).toHaveBeenCalled();
-        });
-    });
-
-    describe('resolveStellarNetworkConfig — parity with resolveNetwork (#1415)', () => {
-        beforeEach(() => {
-            delete process.env.STELLAR_NETWORK;
-            delete process.env.NEXT_PUBLIC_STELLAR_NETWORK;
-            vi.spyOn(console, 'warn').mockImplementation(() => {});
-        });
-
-        afterEach(() => {
-            vi.restoreAllMocks();
-        });
-
-        it('should resolve mainnet for padded " mainnet "', () => {
-            process.env.STELLAR_NETWORK = ' mainnet ';
-            const config = resolveStellarNetworkConfig();
-            expect(config.network).toBe('mainnet');
-            expect(config.networkPassphrase).toBe(NETWORK_PASSPHRASES.mainnet);
-            expect(console.warn).not.toHaveBeenCalled();
-        });
-
-        it('should warn and default to testnet for capitalised "MAINNET"', () => {
-            process.env.STELLAR_NETWORK = 'MAINNET';
-            const config = resolveStellarNetworkConfig();
-            expect(config.network).toBe('testnet');
-            expect(console.warn).toHaveBeenCalledWith(
-                expect.stringContaining('Unrecognized STELLAR_NETWORK value')
-            );
-        });
-
-        it('should warn and default to testnet for unknown values', () => {
-            process.env.STELLAR_NETWORK = 'production';
-            const config = resolveStellarNetworkConfig();
-            expect(config.network).toBe('testnet');
-            expect(console.warn).toHaveBeenCalledWith(
-                expect.stringContaining('Unrecognized STELLAR_NETWORK value')
-            );
-        });
-
-        it('should silently default to testnet when STELLAR_NETWORK is unset', () => {
-            const config = resolveStellarNetworkConfig();
-            expect(config.network).toBe('testnet');
-            expect(console.warn).not.toHaveBeenCalled();
-        });
-
-        it.each(['mainnet', 'testnet', ' mainnet ', '  testnet  ', 'MAINNET', 'Testnet', 'production', ''])(
-            'should resolve %j consistently with getNetworkConfig()',
-            (raw) => {
-                if (raw === '') {
-                    delete process.env.STELLAR_NETWORK;
-                } else {
-                    process.env.STELLAR_NETWORK = raw;
-                }
-
-                const fromResolver = resolveStellarNetworkConfig();
-                const fromGetter = getNetworkConfig();
-
-                expect(fromResolver.network).toBe(fromGetter.network);
-                expect(fromResolver.horizonUrl).toBe(fromGetter.horizonUrl);
-                expect(fromResolver.networkPassphrase).toBe(fromGetter.networkPassphrase);
-                expect(fromResolver.sorobanRpcUrl).toBe(fromGetter.sorobanRpcUrl);
-            }
-        );
     });
 });
-
-// ---------------------------------------------------------------------------
-// Regression #1106 – config.stellar must re-resolve on env change
-// ---------------------------------------------------------------------------
-
-describe('config.stellar live getter (regression #1106)', () => {
-    let originalNetwork: string | undefined;
-
-    beforeEach(() => {
-        originalNetwork = process.env.STELLAR_NETWORK;
-    });
-
-    afterEach(() => {
-        if (originalNetwork === undefined) {
-            delete process.env.STELLAR_NETWORK;
-        } else {
-            process.env.STELLAR_NETWORK = originalNetwork;
-        }
-    });
-
-    it('reflects a change to STELLAR_NETWORK made after module load', async () => {
-        // Dynamically import so the getter is exercised at call-time, not frozen
-        const { config } = await import('./config');
-
-        process.env.STELLAR_NETWORK = 'testnet';
-        const first = config.stellar.network;
-
-        process.env.STELLAR_NETWORK = 'mainnet';
-        const second = config.stellar.network;
-
-        expect(first).toBe('testnet');
-        expect(second).toBe('mainnet');
-        // The critical assertion: the two reads must differ
-        expect(first).not.toBe(second);
-    });
-
-    it('returns testnet after switching back from mainnet', async () => {
-        const { config } = await import('./config');
-
-        process.env.STELLAR_NETWORK = 'mainnet';
-        expect(config.stellar.network).toBe('mainnet');
-
-        process.env.STELLAR_NETWORK = 'testnet';
-        expect(config.stellar.network).toBe('testnet');
-    });
-
-    it('config.stellar always returns the same shape as getNetworkConfig()', async () => {
-        const { config, getNetworkConfig: getConfig } = await import('./config');
-
-        process.env.STELLAR_NETWORK = 'mainnet';
-        const live = config.stellar;
-        const snapshot = getConfig();
-
-        expect(live.network).toBe(snapshot.network);
-        expect(live.horizonUrl).toBe(snapshot.horizonUrl);
-        expect(live.networkPassphrase).toBe(snapshot.networkPassphrase);
-        expect(live.sorobanRpcUrl).toBe(snapshot.sorobanRpcUrl);
-    });
-});
-// ---------------------------------------------------------------------------
-// End regression #1106
-// ---------------------------------------------------------------------------

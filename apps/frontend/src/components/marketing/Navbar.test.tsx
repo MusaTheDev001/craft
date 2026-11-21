@@ -8,6 +8,13 @@ describe('Navbar', () => {
     expect(screen.getByText('CRAFT')).toBeDefined();
   });
 
+  it('renders the brand link with href="/"', () => {
+    render(<Navbar />);
+    const brandLink = screen.getByRole('link', { name: 'CRAFT' });
+    expect(brandLink).toBeDefined();
+    expect(brandLink.getAttribute('href')).toBe('/');
+  });
+
   it('renders default navigation links', () => {
     render(<Navbar />);
     const productsLinks = screen.getAllByText('Products');
@@ -94,7 +101,7 @@ describe('Navbar', () => {
 
   it('applies correct styling classes', () => {
     render(<Navbar />);
-    const logo = screen.getByText('CRAFT');
+    const logo = screen.getByRole('link', { name: 'CRAFT' });
     expect(logo.className).toContain('font-headline');
     expect(logo.className).toContain('font-bold');
     expect(logo.className).toContain('text-blue-900');
