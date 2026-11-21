@@ -139,6 +139,34 @@ describe('POST /api/branding/upload', () => {
         expect(res.status).toBe(200);
     });
 
+    it('accepts SVG whose root element appears after a long comment', async () => {
+        const { POST } = await import('./route');
+        const longComment = `<!-- ${'x'.repeat(2048)} -->`;
+        const safe = new TextEncoder().encode(`${longComment}<svg><text>hi</text></svg>`);
+        const file = new File([safe], 'logo.svg', { type: 'image/svg+xml' });
+
+        mockStorageUpload.mockResolvedValue({
+            data: { path: 'user-1/logo.svg' },
+            error: null,
+        });
+        mockGetPublicUrl.mockReturnValue({
+            data: { publicUrl: 'https://storage.example.com/user-1/logo.svg' },
+        });
+
+        const res = await POST(makeMultipartRequest(file), { params: {} });
+        expect(res.status).toBe(200);
+    });
+
+    it('returns 422 for unsafe SVG whose root element appears after a long comment', async () => {
+        const { POST } = await import('./route');
+        const longComment = `<!-- ${'x'.repeat(2048)} -->`;
+        const evil = new TextEncoder().encode(`${longComment}<svg><script>alert(1)</script></svg>`);
+        const file = new File([evil], 'logo.svg', { type: 'image/svg+xml' });
+        const res = await POST(makeMultipartRequest(file), { params: {} });
+        expect(res.status).toBe(422);
+        expect((await res.json()).code).toBe('UNSAFE_SVG');
+    });
+
     it('returns 500 when storage upload fails', async () => {
         const { POST } = await import('./route');
         const file = new File([PNG_MAGIC], 'logo.png', { type: 'image/png' });
