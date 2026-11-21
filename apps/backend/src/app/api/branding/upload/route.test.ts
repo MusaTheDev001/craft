@@ -113,6 +113,32 @@ describe('POST /api/branding/upload', () => {
         expect((await res.json()).code).toBe('UNSAFE_SVG');
     });
 
+    it('returns 422 for SVG with inline event handler attribute', async () => {
+        const { POST } = await import('./route');
+        const evil = new TextEncoder().encode('<svg onload="alert(1)"></svg>');
+        const file = new File([evil], 'logo.svg', { type: 'image/svg+xml' });
+        const res = await POST(makeMultipartRequest(file), { params: {} });
+        expect(res.status).toBe(422);
+        expect((await res.json()).code).toBe('UNSAFE_SVG');
+    });
+
+    it('accepts SVG text content that merely contains "online ="', async () => {
+        const { POST } = await import('./route');
+        const safe = new TextEncoder().encode('<svg><text>online = true</text></svg>');
+        const file = new File([safe], 'logo.svg', { type: 'image/svg+xml' });
+
+        mockStorageUpload.mockResolvedValue({
+            data: { path: 'user-1/logo.svg' },
+            error: null,
+        });
+        mockGetPublicUrl.mockReturnValue({
+            data: { publicUrl: 'https://storage.example.com/user-1/logo.svg' },
+        });
+
+        const res = await POST(makeMultipartRequest(file), { params: {} });
+        expect(res.status).toBe(200);
+    });
+
     it('returns 500 when storage upload fails', async () => {
         const { POST } = await import('./route');
         const file = new File([PNG_MAGIC], 'logo.png', { type: 'image/png' });
