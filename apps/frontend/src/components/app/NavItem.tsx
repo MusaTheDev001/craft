@@ -27,7 +27,7 @@ export function NavItem({
   const stateClasses = disabled
     ? 'opacity-40 cursor-not-allowed'
     : active
-    ? 'bg-secondary-container text-on-secondary-container font-semibold border-l-3 border-surface-tint'
+    ? 'bg-secondary-container text-on-secondary-container font-semibold border-l-4 border-surface-tint'
     : 'text-on-surface-variant hover:bg-surface-container hover:text-on-surface';
 
   const content = (
@@ -44,7 +44,12 @@ export function NavItem({
 
   if (disabled) {
     return (
-      <div className={`${baseClasses} ${stateClasses}`}>
+      <div
+        className={`${baseClasses} ${stateClasses}`}
+        aria-disabled="true"
+        role="link"
+        tabIndex={-1}
+      >
         {content}
       </div>
     );

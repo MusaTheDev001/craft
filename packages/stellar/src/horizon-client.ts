@@ -3,12 +3,18 @@
  *
  * Wraps raw Horizon HTTP calls with:
  * - Adaptive backoff: respects X-RateLimit-Remaining / X-RateLimit-Reset
- * - Circuit breaker: opens after 5 failures in 30 s, half-opens after 60 s
+ * - Circuit breaker: opens after 5 failures within the failure window (default 30 s),
+ *   half-opens after 60 s
  * - Retry budget: maximum 3 retries per request regardless of rate-limit headroom
  * - Logging: each retry is logged to the analytics service
+ *
+ * Retryable failures are limited to network errors, HTTP 429 (Too Many Requests)
+ * and HTTP 5xx (server errors). Other 4xx responses (e.g. 400, 404) are
+ * non-retryable: they are thrown immediately after a single attempt and are not
+ * counted as circuit failures.
  */
 
-import { CircuitBreaker } from './circuit-breaker';
+import { CircuitBreaker, CircuitOpenError } from './circuit-breaker';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -66,6 +72,17 @@ export type BodyInit = string | Uint8Array | ReadableStream<Uint8Array> | FormDa
 export const MAX_BACKOFF_DELAY_MS = 5_000;
 
 /**
+ * Returns true when an HTTP status code is worth retrying.
+ *
+ * Only 429 (Too Many Requests) and 5xx (server errors) are retryable. All other
+ * 4xx responses are client errors that will not succeed on retry, so they are
+ * thrown immediately and excluded from circuit failure counting.
+ */
+export function isRetryableStatus(status: number): boolean {
+  return status === 429 || (status >= 500 && status <= 599);
+}
+
+/**
  * Computes the backoff delay in ms for a given response.
  *
  * - If X-RateLimit-Remaining < 10, delays until X-RateLimit-Reset (epoch seconds),
@@ -114,6 +131,7 @@ export class HorizonClient {
       name: 'horizon',
       failureThreshold: options.circuitOpenThreshold ?? 5,
       resetTimeoutMs: options.circuitRecoveryMs ?? 60_000,
+      failureWindowMs: options.circuitWindowMs ?? 30_000,
     });
   }
 
@@ -124,13 +142,22 @@ export class HorizonClient {
    * regardless of method. Note that retry-safety for non-idempotent methods (POST) depends
    * on server-side deduplication (e.g., Horizon's dedupe-by-hash behavior for transactions).
    *
+   * Only network errors, HTTP 429 and HTTP 5xx responses are retried and counted as
+   * circuit failures. Other 4xx responses are thrown immediately after a single
+   * attempt without affecting the circuit breaker.
+   *
    * @param path - URL path relative to baseUrl
    * @param options - Request options (method, body, headers)
-   * @throws {Error} When the circuit is open or all retries are exhausted.
+   * @throws {CircuitOpenError} When the circuit is open. The error exposes the
+   *   remaining wait time via `retryAfterMs` (if available).
+   * @throws {Error} When all retries are exhausted or a non-retryable error occurs.
    */
   async request<T>(path: string, options?: RequestOptions): Promise<HorizonResponse<T>> {
     if (this.circuit.isOpen()) {
-      throw new Error(`Circuit breaker is open. Horizon requests are suspended.`);
+      throw new CircuitOpenError(
+        'Circuit breaker is open. Horizon requests are suspended.',
+        this.circuit.getRemainingOpenMs?.(),
+      );
     }
 
     const url = `${this.baseUrl}${path}`;
@@ -153,15 +180,31 @@ export class HorizonClient {
         lastHeaders = headers;
 
         if (res.ok) {
-          this.circuit.recordSuccess();
+          // Parse the body before recording success so a JSON parse failure
+          // is counted as exactly one failure (not a success + a failure).
           const data = (await res.json()) as T;
+          this.circuit.recordSuccess();
           return { data, headers };
         }
 
-        // Treat non-OK responses as failures
         const err = new Error(`Horizon returned HTTP ${res.status} for ${path}`);
-        throw Object.assign(err, { status: res.status, headers });
+        Object.assign(err, { status: res.status, headers });
+
+        // Non-retryable client errors (e.g. 400, 404) are thrown immediately
+        // and must not count toward the circuit failure budget.
+        if (!isRetryableStatus(res.status)) {
+          throw err;
+        }
+
+        throw err;
       } catch (err: unknown) {
+        const status = (err as { status?: number }).status;
+        const retryable = status === undefined || isRetryableStatus(status);
+
+        if (!retryable) {
+          throw err;
+        }
+
         this.circuit.recordFailure();
 
         if (attempt >= this.maxRetries || this.circuit.isOpen()) {
@@ -179,25 +222,6 @@ export class HorizonClient {
   /**
    * Performs an HTTP GET with adaptive retry and circuit breaker protection.
    *
-   * Thin wrapper around request(path, { method: 'GET' }) for backwards compatibility.
-   *
-   * @throws {Error} When the circuit is open or all retries are exhausted.
-   */
-  async get<T>(path: string): Promise<HorizonResponse<T>> {
-    return this.request<T>(path, { method: 'GET' });
-  }
-}
+   * Thin wra
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
-function extractHeaders(headers: Headers): Record<string, string> {
-  const result: Record<string, string> = {};
-  headers.forEach((value, key) => {
-    result[key.toLowerCase()] = value;
-  });
-  return result;
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+/* … truncated 224 chars — edit only what you need near the top … */
