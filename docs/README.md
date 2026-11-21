@@ -57,6 +57,9 @@ GITHUB_APP_INSTALLATION_ID=12345678
 GITHUB_API_BASE_URL=https://api.github.com
 STRIPE_SECRET_KEY=your_stripe_key
 STRIPE_WEBHOOK_SECRET=your_webhook_secret
+STRIPE_TAX_ENABLED=false # Set to true to enable Stripe Tax collection
+STRIPE_TAX_COLLECT_ID=your_tax_collect_id # Stripe Tax collection ID (optional)
+VERCEL_PROTECTION_BYPASS_SECRET=your_secret # Sensitive: secret for preview bypass tokens
 ```
 
 ---
