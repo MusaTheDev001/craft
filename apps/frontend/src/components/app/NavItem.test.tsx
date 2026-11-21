@@ -33,6 +33,21 @@ describe('NavItem', () => {
     expect(link.getAttribute('aria-current')).toBe('page');
   });
 
+  it('uses a valid border width class for the active indicator', () => {
+    render(
+      <NavItem
+        label="Templates"
+        icon={mockIcon}
+        path="/app/templates"
+        active={true}
+      />
+    );
+
+    const link = screen.getByRole('link');
+    expect(link.className).toContain('border-l-4');
+    expect(link.className).not.toContain('border-l-3');
+  });
+
   it('shows badge when provided', () => {
     render(
       <NavItem
@@ -74,6 +89,21 @@ describe('NavItem', () => {
     expect(element?.className).toContain('cursor-not-allowed');
   });
 
+  it('exposes the disabled state to assistive technology', () => {
+    render(
+      <NavItem
+        label="Templates"
+        icon={mockIcon}
+        path="/app/templates"
+        disabled={true}
+      />
+    );
+
+    const element = screen.getByRole('link');
+    expect(element.getAttribute('aria-disabled')).toBe('true');
+    expect(element.getAttribute('tabindex')).toBe('-1');
+  });
+
   it('handles click events', () => {
     const handleClick = vi.fn();
     render(
@@ -100,5 +130,21 @@ describe('NavItem', () => {
     );
     
     expect(screen.queryByRole('link')).toBeNull();
+  });
+
+  it('renders the disabled variant as a non-focusable link role', () => {
+    render(
+      <NavItem
+        label="Templates"
+        icon={mockIcon}
+        path="/app/templates"
+        disabled={true}
+      />
+    );
+
+    const element = screen.getByText('Templates').closest('div');
+    expect(element?.getAttribute('role')).toBe('link');
+    expect(element?.getAttribute('aria-disabled')).toBe('true');
+    expect(element?.getAttribute('tabindex')).toBe('-1');
   });
 });

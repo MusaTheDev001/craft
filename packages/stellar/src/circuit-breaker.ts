@@ -15,6 +15,12 @@
  *   HALF_OPEN → CLOSED  on probe success
  *   HALF_OPEN → OPEN    on probe failure (resets the timeout)
  *
+ * Failure window:
+ *   When `failureWindowMs` is set, failures older than the window are
+ *   discarded before counting, so the threshold must be reached within
+ *   that window. When unset, failures accumulate until a success resets
+ *   them (the default behaviour).
+ *
  * Supports two usage patterns:
  *   1. Functional wrapper: await breaker.call(() => someAsyncFn())
  *   2. Manual state checks: isOpen(), recordSuccess(), recordFailure()
@@ -54,6 +60,11 @@ export interface CircuitBreakerConfig {
    * throw a `RangeError` at construction.
    */
   resetTimeoutMs?: number;
+  /**
+   * Failure counting window (ms). Failures older than this are discarded
+   * before counting. When omitted, failures accumulate until a success.
+   */
+  failureWindowMs?: number;
   /** Injected clock — override in tests. Default: Date.now */
   now?: () => number;
   /** Called whenever the circuit transitions between states. */
@@ -62,9 +73,13 @@ export interface CircuitBreakerConfig {
 
 /** Thrown when a call is rejected because the circuit is OPEN. */
 export class CircuitOpenError extends Error {
+  /** Remaining wait time (ms) before the circuit may allow a probe. */
+  readonly retryAfterMs: number;
+
   constructor(name: string, retryAfterMs: number) {
     super(`Circuit "${name}" is OPEN — retry after ${retryAfterMs}ms`);
     this.name = 'CircuitOpenError';
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -72,9 +87,11 @@ export class CircuitBreaker {
   private state: CircuitState = 'CLOSED';
   private failureCount = 0;
   private openedAt: number | null = null;
+  private failureTimestamps: number[] = [];
 
   private readonly failureThreshold: number;
   private readonly resetTimeoutMs: number;
+  private readonly failureWindowMs?: number;
   private readonly now: () => number;
   private readonly onStateChange?: CircuitBreakerConfig['onStateChange'];
   readonly name: string;
@@ -87,6 +104,7 @@ export class CircuitBreaker {
     assertPositiveInteger(this.failureThreshold, 'failureThreshold');
     assertPositiveInteger(this.resetTimeoutMs, 'resetTimeoutMs');
 
+    this.failureWindowMs = config.failureWindowMs;
     this.now = config.now ?? Date.now;
     this.onStateChange = config.onStateChange;
   }
@@ -107,8 +125,7 @@ export class CircuitBreaker {
     this.transitionIfDue();
 
     if (this.state === 'OPEN') {
-      const retryAfterMs = this.openedAt! + this.resetTimeoutMs - this.now();
-      throw new CircuitOpenError(this.name, Math.max(0, retryAfterMs));
+      throw new CircuitOpenError(this.name, this.retryAfterMs());
     }
 
     try {
@@ -142,6 +159,17 @@ export class CircuitBreaker {
   }
 
   /**
+   * Get the remaining wait time (ms) before the circuit may allow a probe.
+   * Returns 0 when the circuit is not OPEN.
+   *
+   * @returns Remaining retry-after time in milliseconds
+   */
+  getRetryAfterMs(): number {
+    this.transitionIfDue();
+    return this.retryAfterMs();
+  }
+
+  /**
    * Record a successful call (manual state API).
    * Resets failure count and transitions to CLOSED.
    */
@@ -162,9 +190,15 @@ export class CircuitBreaker {
     this.state = 'CLOSED';
     this.failureCount = 0;
     this.openedAt = null;
+    this.failureTimestamps = [];
   }
 
   // ── Private ──────────────────────────────────────────────────────────────
+
+  private retryAfterMs(): number {
+    if (this.state !== 'OPEN' || this.openedAt === null) return 0;
+    return Math.max(0, this.openedAt + this.resetTimeoutMs - this.now());
+  }
 
   private transitionIfDue(): void {
     if (this.state === 'OPEN' && this.openedAt !== null) {
@@ -177,19 +211,30 @@ export class CircuitBreaker {
   private onSuccess(): void {
     const prev = this.state;
     this.failureCount = 0;
+    this.failureTimestamps = [];
     this.openedAt = null;
     this.state = 'CLOSED';
     if (prev !== 'CLOSED') this.onStateChange?.(this.name, prev, 'CLOSED');
   }
 
   private onFailure(): void {
-    this.failureCount += 1;
+    const now = this.now();
+
+    if (this.failureWindowMs !== undefined) {
+      const cutoff = now - this.failureWindowMs;
+      this.failureTimestamps = this.failureTimestamps.filter((ts) => ts > cutoff);
+      this.failureTimestamps.push(now);
+      this.failureCount = this.failureTimestamps.length;
+    } else {
+      this.failureCount += 1;
+    }
 
     if (this.state === 'HALF_OPEN' || this.failureCount >= this.failureThreshold) {
       const prev = this.state;
       this.state = 'OPEN';
-      this.openedAt = this.now();
+      this.openedAt = now;
       this.failureCount = 0;
+      this.failureTimestamps = [];
       this.onStateChange?.(this.name, prev, 'OPEN', { resetTimeoutMs: this.resetTimeoutMs });
     }
   }

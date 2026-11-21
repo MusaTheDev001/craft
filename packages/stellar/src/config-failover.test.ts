@@ -12,6 +12,31 @@ describe('createHorizonFailover (#615)', () => {
         expect(() => createHorizonFailover({ endpoints: [] })).toThrow();
     });
 
+    it('throws when only blank endpoints are provided', () => {
+        expect(() => createHorizonFailover({ endpoints: [''] })).toThrow();
+        expect(() => createHorizonFailover({ endpoints: ['', '   '] })).toThrow();
+    });
+
+    it('trims and dedupes endpoints', () => {
+        const f = createHorizonFailover({
+            endpoints: ['  https://primary.example.com  ', 'https://primary.example.com', 'https://secondary.example.com'],
+        });
+        expect(f.selectEndpoint()).toBe('https://primary.example.com');
+        f.markUnhealthy('https://primary.example.com');
+        expect(f.selectEndpoint()).toBe('https://secondary.example.com');
+    });
+
+    it('rejects non-https endpoints', () => {
+        expect(() => createHorizonFailover({ endpoints: ['http://primary.example.com'] })).toThrow();
+        expect(() => createHorizonFailover({ endpoints: ['not-a-url'] })).toThrow();
+    });
+
+    it('throws a RangeError for negative recoveryMs', () => {
+        expect(() =>
+            createHorizonFailover({ endpoints: ['https://primary.example.com'], recoveryMs: -1 }),
+        ).toThrow(RangeError);
+    });
+
     it('returns the primary endpoint when all are healthy', () => {
         const f = createHorizonFailover({ endpoints: ['https://primary.example.com', 'https://secondary.example.com'] });
         expect(f.selectEndpoint()).toBe('https://primary.example.com');

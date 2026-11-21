@@ -1,6 +1,12 @@
 /**
  * CORS configuration for the CRAFT API
  *
+ * OWNER: @craft/backend — this is the single source of truth for the CORS
+ * helper.  The frontend workspace previously carried a byte-for-byte
+ * duplicate of this file; that copy has been removed so CORS fixes only
+ * need to be applied here.  Do not re-introduce a copy in another
+ * workspace — import from this module instead.
+ *
  * Allowed-origins strategy:
  *   - Production: read from the ALLOWED_ORIGINS environment variable,
  *     which is a comma-separated list of fully-qualified origins

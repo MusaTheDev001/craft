@@ -1,6 +1,11 @@
 /**
  * CORS configuration for the CRAFT API
  *
+ * OWNER: This helper is owned by the backend workspace. The frontend copy
+ * was a verbatim duplicate and has been removed; the frontend must import
+ * the helper from the backend/shared source so CORS fixes reach both copies.
+ * Do not reintroduce a local copy here.
+ *
  * Allowed-origins strategy:
  *   - Production: read from the ALLOWED_ORIGINS environment variable,
  *     which is a comma-separated list of fully-qualified origins
