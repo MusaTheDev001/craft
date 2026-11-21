@@ -2001,3 +2001,8 @@ CRAFT wouldn't be possible without these amazing projects and communities:
 
 ## Automated PR Test
 This change is added by GitHub Copilot exercise.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1481 -->
+- #1481: Document the Request Size Limits and Branding Upload Constraints in the API Reference
