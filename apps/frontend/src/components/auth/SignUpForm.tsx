@@ -26,6 +26,7 @@ interface SignUpFormProps {
 
 export function SignUpForm({ onSubmit }: SignUpFormProps) {
   const [visible, setVisible] = useState(false);
+  const [serverError, setServerError] = useState<string | null>(null);
   const {
     register,
     handleSubmit,
@@ -34,8 +35,32 @@ export function SignUpForm({ onSubmit }: SignUpFormProps) {
     resolver: zodResolver(signUpSchema),
   });
 
+  const hasServerError = serverError !== null;
+  const serverErrorId = 'signup-server-error';
+
+  const handleFormSubmit = async (data: SignUpFormData) => {
+    setServerError(null);
+    try {
+      await onSubmit(data);
+    } catch (error) {
+      setServerError(
+        error instanceof Error ? error.message : 'Something went wrong. Please try again.',
+      );
+    }
+  };
+
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+    <form onSubmit={handleSubmit(handleFormSubmit)} className="space-y-4">
+      {hasServerError && (
+        <div
+          id={serverErrorId}
+          role="alert"
+          className="rounded-md bg-red-50 p-3 text-sm text-red-700"
+        >
+          {serverError}
+        </div>
+      )}
+
       <div>
         <label htmlFor="email" className="block text-sm font-medium text-gray-700">
           Email
@@ -45,6 +70,8 @@ export function SignUpForm({ onSubmit }: SignUpFormProps) {
           type="email"
           autoComplete="email"
           {...register('email')}
+          aria-invalid={hasServerError || undefined}
+          aria-describedby={hasServerError ? serverErrorId : undefined}
           className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
         />
         {errors.email && (
@@ -62,6 +89,8 @@ export function SignUpForm({ onSubmit }: SignUpFormProps) {
             type={visible ? 'text' : 'password'}
             autoComplete="new-password"
             {...register('password')}
+            aria-invalid={hasServerError || undefined}
+            aria-describedby={hasServerError ? serverErrorId : undefined}
             className="block w-full rounded-md border-gray-300 shadow-sm pr-10"
           />
           <button
@@ -88,6 +117,8 @@ export function SignUpForm({ onSubmit }: SignUpFormProps) {
           type={visible ? 'text' : 'password'}
           autoComplete="new-password"
           {...register('confirmPassword')}
+          aria-invalid={hasServerError || undefined}
+          aria-describedby={hasServerError ? serverErrorId : undefined}
           className="mt-1 block w-full rounded-md border-gray-300 shadow-sm"
         />
         {errors.confirmPassword && (
