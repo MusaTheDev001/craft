@@ -12,6 +12,10 @@
  *
  * Custom retryability:
  *   await withRetry(fn, { isRetryable: (err) => err.code === 'ECONNRESET' });
+ *
+ * @deprecated This module is a thin re-export of the canonical retry helper at
+ * `lib/retry/exponential-backoff`. Import from there instead. This path is kept
+ * only for backwards compatibility and will be removed in a future release.
  */
 
 import { isRetryableError, type AppError } from './retryable-error';

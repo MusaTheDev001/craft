@@ -7,9 +7,10 @@ interface ErrorReportFormProps {
   isOpen: boolean;
   onClose: () => void;
   context?: ErrorReportContext;
+  onSubmit?: (message: string) => Promise<void> | void;
 }
 
-export function ErrorReportForm({ isOpen, onClose, context }: ErrorReportFormProps) {
+export function ErrorReportForm({ isOpen, onClose, context, onSubmit }: ErrorReportFormProps) {
   const [description, setDescription] = useState('');
   const [status, setStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -42,11 +43,17 @@ export function ErrorReportForm({ isOpen, onClose, context }: ErrorReportFormPro
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (status === 'submitting') return;
+    if (description.trim().length === 0) return;
     setStatus('submitting');
     setErrorMessage(null);
     try {
-      await submitReport({ description, context });
+      if (onSubmit) {
+        await onSubmit(description);
+      } else {
+        await submitReport({ description, context });
+      }
       setStatus('success');
+      setDescription('');
       onClose();
     } catch (err) {
       setStatus('error');
@@ -88,7 +95,7 @@ export function ErrorReportForm({ isOpen, onClose, context }: ErrorReportFormPro
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
+        <form onSubmit={handleSubmit} className="space-y-4" aria-label="Error report form">
           <div>
             <label htmlFor="error-description" className="mb-1 block text-sm font-medium text-gray-700">
               Description
@@ -113,8 +120,16 @@ export function ErrorReportForm({ isOpen, onClose, context }: ErrorReportFormPro
             </p>
           )}
 
+          {status === 'success' && (
+            <p role="status" className="text-sm text-green-600">
+              <span aria-hidden="true">✅</span> Report sent successfully.
+            </p>
+          )}
+
           {errorMessage && (
-            <p className="text-sm text-red-600">{errorMessage}</p>
+            <p role="alert" className="text-sm text-red-600">
+              <span aria-hidden="true">✕</span> {errorMessage}
+            </p>
           )}
 
           <div className="flex justify-end gap-2">

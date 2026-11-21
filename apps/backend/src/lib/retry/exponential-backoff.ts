@@ -1,6 +1,10 @@
 /**
  * Exponential backoff retry with jitter for transient failures.
  * Distinguishes retryable (5xx, network, rate limit) from non-retryable (4xx) errors.
+ *
+ * This module is the canonical retry implementation. The legacy helper at
+ * `apps/backend/src/lib/api/retry.ts` re-exports from here for backwards
+ * compatibility (see #1475).
  */
 
 export interface RetryOptions {

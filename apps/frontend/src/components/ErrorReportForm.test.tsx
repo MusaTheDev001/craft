@@ -7,11 +7,18 @@ describe('ErrorReportForm', () => {
 
   beforeEach(() => {
     onClose.mockReset();
+    vi.restoreAllMocks();
   });
 
   it('renders the form', () => {
     render(<ErrorReportForm onClose={onClose} />);
     expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  it('renders the form fields', () => {
+    render(<ErrorReportForm onClose={onClose} />);
+    expect(screen.getByLabelText(/description/i)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /submit/i })).toBeInTheDocument();
   });
 
   it('calls onClose when the backdrop is clicked while idle and empty', () => {
@@ -49,5 +56,34 @@ describe('ErrorReportForm', () => {
 
     fireEvent.click(screen.getByTestId('error-report-backdrop'));
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('hides the success emoji from screen readers', async () => {
+    const fetchMock = vi
+      .spyOn(global, 'fetch')
+      .mockResolvedValue({ ok: true, json: async () => ({}) } as Response);
+
+    render(<ErrorReportForm onClose={onClose} />);
+
+    fireEvent.change(screen.getByLabelText(/description/i), {
+      target: { value: 'Something broke' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /submit/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+
+    const emoji = await screen.findByText('✅');
+    expect(emoji).toHaveAttribute('aria-hidden', 'true');
+  });
+
+  it('hides the close glyph from screen readers while keeping the button label', () => {
+    render(<ErrorReportForm onClose={onClose} />);
+
+    const closeButton = screen.getByRole('button', { name: /close/i });
+    expect(closeButton).toHaveAttribute('aria-label');
+
+    const glyph = closeButton.querySelector('[aria-hidden="true"]');
+    expect(glyph).not.toBeNull();
+    expect(glyph).toHaveTextContent('✕');
   });
 });

@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
+import fc from 'fast-check';
 
 const mockGetUser = vi.fn();
 vi.mock('@/lib/supabase/server', () => ({
@@ -20,6 +21,10 @@ const makeRequest = (body: unknown) =>
         body: JSON.stringify(body),
         headers: { 'Content-Type': 'application/json' },
     });
+
+// Known valid Stellar contract address (Strkey C... with valid CRC16/XMODEM checksum).
+const VALID_CONTRACT_ADDRESS = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
+const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
 describe('POST /api/customization/validate', () => {
     beforeEach(() => {
@@ -72,5 +77,46 @@ describe('POST /api/customization/validate', () => {
         });
         const res = await POST(req, { params: {} });
         expect(res.status).toBe(400);
+    });
+
+    it('rejects single-character corruption of a valid contract address (CRC16 property)', async () => {
+        const { POST } = await import('./route');
+        await fc.assert(
+            fc.asyncProperty(
+                fc.integer({ min: 0, max: VALID_CONTRACT_ADDRESS.length - 1 }),
+                fc.integer({ min: 0, max: BASE32_ALPHABET.length - 1 }),
+                async (index, alphabetIndex) => {
+                    const replacement = BASE32_ALPHABET[alphabetIndex];
+                    if (VALID_CONTRACT_ADDRESS[index] === replacement) {
+                        return true;
+                    }
+                    const mutated =
+                        VALID_CONTRACT_ADDRESS.slice(0, index) +
+                        replacement +
+                        VALID_CONTRACT_ADDRESS.slice(index + 1);
+
+                    const res = await POST(
+                        makeRequest({
+                            ...valid,
+                            stellar: { ...valid.stellar, contractAddress: mutated },
+                        }),
+                        { params: {} },
+                    );
+                    const body = await res.json();
+                    expect(res.status).toBe(422);
+                    expect(body.valid).toBe(false);
+                    const codes = body.errors.map((e: { code: string }) => e.code);
+                    expect(
+                        codes.some(
+                            (code: string) =>
+                                code === 'CONTRACT_ADDRESS_INVALID_CHECKSUM' ||
+                                code === 'CONTRACT_ADDRESS_INVALID_VERSION',
+                        ),
+                    ).toBe(true);
+                    return true;
+                },
+            ),
+            { numRuns: 25 },
+        );
     });
 });
