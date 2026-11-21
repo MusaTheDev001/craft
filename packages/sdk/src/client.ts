@@ -10,6 +10,20 @@ export type { DeploymentStatusType } from '@craft/types';
 export type SubscriptionTier = 'free' | 'pro' | 'enterprise';
 
 /**
+ * Known Stripe subscription statuses.
+ * @see https://stripe.com/docs/api/subscriptions/object#subscription_object-status
+ */
+export type SubscriptionStatusType =
+  | 'active'
+  | 'canceled'
+  | 'incomplete'
+  | 'incomplete_expired'
+  | 'past_due'
+  | 'paused'
+  | 'trialing'
+  | 'unpaid';
+
+/**
  * Configuration options for CraftClient.
  * @property baseUrl - The base URL of the CRAFT API (e.g., https://craft.app)
  * @property accessToken - Optional JWT access token for authenticated requests
@@ -47,7 +61,12 @@ export interface UserProfile {
   email: string;
   fullName: string;
   subscriptionTier: SubscriptionTier;
-  createdAt: Date;
+  /**
+   * Account creation timestamp as an ISO 8601 string (e.g. `2024-01-15T10:30:00.000Z`).
+   * This is the raw value from the parsed JSON response — not a `Date` instance.
+   * Use `new Date(profile.createdAt)` if you need a `Date`.
+   */
+  createdAt: string;
   githubConnected: boolean;
   githubUsername: string | null;
 }
@@ -63,18 +82,17 @@ export interface Template {
   thumbnailUrl?: string;
 }
 
-export interface TemplateListResponse {
-  templates: Template[];
-  total: number;
-  limit: number;
-  offset: number;
-}
+/**
+ * Response shape of GET /api/templates.
+ *
+ * The route returns a plain array from `templateService.listTemplates`; it does
+ * not paginate, so there is no `total`/`limit`/`offset` envelope.
+ */
+export type TemplateListResponse = Template[];
 
 export interface TemplateListOptions {
   category?: string;
   search?: string;
-  limit?: number;
-  offset?: number;
 }
 
 export interface CheckoutRequest {
@@ -90,8 +108,8 @@ export interface CheckoutResponse {
 
 export interface SubscriptionStatus {
   subscriptionId: string;
-  status: string;
-  tier: string;
+  status: SubscriptionStatusType;
+  tier: SubscriptionTier;
   currentPeriodEnd: string;
   cancelAtPeriodEnd: boolean;
 }
@@ -217,6 +235,11 @@ export class CraftClient {
    * with code 'RATE_LIMITED' is thrown.
    * Each attempt is bounded by `timeoutMs`; a stalled request is aborted and rejects
    * with a CraftApiError (status 0, code 'TIMEOUT').
+   *
+   * On a 2xx response the body is parsed as JSON. A 204 No Content (or any empty
+   * body) resolves to `undefined`. If the body is not valid JSON (e.g. an HTML page
+   * served by a proxy), a CraftApiError carrying the response status is thrown
+   * instead of a raw SyntaxError, so every failure surfaces as CraftApiError.
    */
   private async request<T>(method: string, path: string, body?: unknown): Promise<T> {
     for (let attempt = 0; ; attempt++) {
@@ -244,7 +267,20 @@ export class CraftClient {
         clearTimeout(timer);
       }
 
-      if (res.ok) return res.json() as Promise<T>;
+      if (res.ok) {
+        if (res.status === 204) return undefined as T;
+        const text = await res.text();
+        if (text.trim() === '') return undefined as T;
+        try {
+          return JSON.parse(text) as T;
+        } catch {
+          throw new CraftApiError(
+            res.status,
+            `Expected JSON response but received non-JSON body (status ${res.status})`,
+            'INVALID_RESPONSE_BODY',
+          );
+        }
+      }
 
       const text = await res.text().catch(() => res.statusText);
       let message = text;
@@ -255,27 +291,29 @@ export class CraftClient {
         if (errorBody.message && typeof errorBody.message === 'string') {
           message = errorBody.message;
         } else if (errorBody.error && typeof errorBody.error === 'string') {
-          // Rate-limit middleware responses use `error` rather than `message`.
           message = errorBody.error;
         }
         if (errorBody.code && typeof errorBody.code === 'string') {
           code = errorBody.code;
         }
       } catch {
-        // text is not JSON; use raw text as message
+        // Non-JSON error body; fall back to raw text.
       }
 
-      if (res.status !== 429) {
-        throw new CraftApiError(res.status, message, code);
+      if (res.status === 429 && attempt < this.maxRetries) {
+        const retryAfterMs = resolveRetryAfterMs(res, errorBody);
+        if (retryAfterMs <= this.maxRetryDelayMs) {
+          await sleep(retryAfterMs);
+          continue;
+        }
       }
 
-      const retryAfterMs = resolveRetryAfterMs(res, errorBody);
-      if (attempt >= this.maxRetries) {
+      if (res.status === 429) {
         throw new CraftApiError(
-          429,
-          `Rate limit exceeded; gave up after ${attempt} ${attempt === 1 ? 'retry' : 'retries'} (server asked to retry after ${retryAfterMs}ms): ${message}`,
+          res.status,
+          message || 'Rate limit exceeded',
           code ?? 'RATE_LIMITED',
-          retryAfterMs,
+          resolveRetryAfterMs(res, errorBody),
         );
       }
       if (retryAfterMs > this.maxRetryDelayMs) {
@@ -287,13 +325,16 @@ export class CraftClient {
         );
       }
       await sleep(retryAfterMs);
+      continue;
+
+      throw new CraftApiError(res.status, message || `Request failed with status ${res.status}`, code);
     }
   }
 
   /**
    * Registers a new user account.
-   * @param data - Sign-up details
-   * @returns The created user and session tokens
+   * @param data - Sign-up credentials and profile info
+   * @returns Auth response with user and session tokens
    */
   async signUp(data: SignUpRequest): Promise<AuthResponse> {
     return this.request<AuthResponse>('POST', '/api/auth/signup', data);
@@ -302,10 +343,17 @@ export class CraftClient {
   /**
    * Authenticates an existing user.
    * @param data - Sign-in credentials
-   * @returns The user and session tokens
+   * @returns Auth response with user and session tokens
    */
   async signIn(data: SignInRequest): Promise<AuthResponse> {
     return this.request<AuthResponse>('POST', '/api/auth/signin', data);
+  }
+
+  /**
+   * Signs out the current user.
+   */
+  async signOut(): Promise<void> {
+    return this.request<void>('POST', '/api/auth/signout');
   }
 
   /**
@@ -332,8 +380,8 @@ export class CraftClient {
   }
 
   /**
-   * Fetches a single template by id.
-   * @param id - Template id
+   * Fetches a single template by ID.
+   * @param id - Template ID
    * @returns The template
    */
   async getTemplate(id: string): Promise<Template> {
@@ -342,10 +390,10 @@ export class CraftClient {
 
   /**
    * Creates a Stripe checkout session for a subscription.
-   * @param data - Checkout details
+   * @param data - Checkout request details
    * @returns The checkout session id and redirect URL
    */
-  async createCheckout(data: CheckoutRequest): Promise<CheckoutResponse> {
+  async createCheckoutSession(data: CheckoutRequest): Promise<CheckoutResponse> {
     return this.request<CheckoutResponse>('POST', '/api/payments/checkout', data);
   }
 
