@@ -6,7 +6,7 @@
  *
  * Escalation:
  *   - 3 consecutive failures → Slack webhook alert (SLACK_WEBHOOK_URL)
- *   - 6 consecutive failures → email alert (console.error [EMAIL_ALERT])
+ *   - 6 consecutive failures → email alert (via EmailDeliveryService.send)
  *   - Successful run        → resets consecutive_failures to 0
  *
  * Issue: #759
@@ -14,20 +14,26 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
+import { emailDeliveryService } from './email-delivery.service';
 
 const SLACK_ALERT_THRESHOLD = 3;
 const EMAIL_ALERT_THRESHOLD = 6;
 
 export class CronFailureTrackerService {
     /**
-     * Record a successful cron run — clears the consecutive failure count.
+     * Record a successful cron run — clears the consecutive failure count
+     * and resets alert tracking.
      */
     async recordSuccess(jobName: string): Promise<void> {
         const supabase = createClient();
+
+        // Reset alert flags and zero the counter
         await supabase.from('cron_job_failures').upsert(
             {
                 job_name: jobName,
                 consecutive_failures: 0,
+                slack_alert_sent: false,
+                email_alert_sent: false,
                 last_success_at: new Date().toISOString(),
                 last_error: null,
                 updated_at: new Date().toISOString(),
@@ -37,32 +43,112 @@ export class CronFailureTrackerService {
     }
 
     /**
-     * Record a failed cron run, increment the counter, and trigger alerts
-     * at the configured thresholds.
+    * Record a failed cron run with the increment_cron_failure RPC, then
+    * trigger escalation alerts. The RPC prevents lost increments under
+    * concurrent calls.
      */
     async recordFailure(jobName: string, error: string): Promise<void> {
         const supabase = createClient();
 
-        // Fetch current count
-        const { data: existing } = await supabase
-            .from('cron_job_failures')
-            .select('consecutive_failures')
-            .eq('job_name', jobName)
-            .single();
-
-        const newCount = (existing?.consecutive_failures ?? 0) + 1;
-
-        await supabase.from('cron_job_failures').upsert(
-            {
-                job_name: jobName,
-                consecutive_failures: newCount,
-                last_failure_at: new Date().toISOString(),
-                last_error: error,
-                updated_at: new Date().toISOString(),
-            },
-            { onConflict: 'job_name' }
+        // Atomically increment the consecutive failure count via RPC
+        const { data: count, error: rpcError } = await supabase.rpc(
+            'increment_cron_failure',
+            { p_job_name: jobName, p_error: error },
         );
 
+        if (rpcError) {
+            console.error('[cron-failure-tracker] RPC call failed, falling back to optimistic concurrency update', rpcError);
+            /**
+             * Fallback path when `increment_cron_failure` RPC is unavailable.
+             *
+             * Note on non-atomicity: A naive read-then-upsert is subject to race conditions
+             * if two workers fail concurrently for the same jobName (both read same count and write count + 1,
+             * losing an increment). To mitigate lost updates, we use an optimistic-concurrency guard:
+             * conditional update on the expected consecutive_failures value with a retry loop.
+             */
+            const MAX_RETRIES = 3;
+            let persistedCount: number | null = null;
+
+            for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+                const { data: existing } = await supabase
+                    .from('cron_job_failures')
+                    .select('consecutive_failures')
+                    .eq('job_name', jobName)
+                    .maybeSingle();
+
+                if (existing) {
+                    const currentFailures = existing.consecutive_failures ?? 0;
+                    const nextCount = currentFailures + 1;
+                    const { data: updated, error: updateErr } = await supabase
+                        .from('cron_job_failures')
+                        .update({
+                            consecutive_failures: nextCount,
+                            last_failure_at: new Date().toISOString(),
+                            last_error: error,
+                            updated_at: new Date().toISOString(),
+                        })
+                        .eq('job_name', jobName)
+                        .eq('consecutive_failures', currentFailures)
+                        .select('consecutive_failures')
+                        .maybeSingle();
+
+                    if (!updateErr && updated) {
+                        persistedCount = updated.consecutive_failures;
+                        break;
+                    }
+                } else {
+                    const { data: inserted, error: insertErr } = await supabase
+                        .from('cron_job_failures')
+                        .insert({
+                            job_name: jobName,
+                            consecutive_failures: 1,
+                            last_failure_at: new Date().toISOString(),
+                            last_error: error,
+                            updated_at: new Date().toISOString(),
+                        })
+                        .select('consecutive_failures')
+                        .maybeSingle();
+
+                    if (!insertErr && inserted) {
+                        persistedCount = inserted.consecutive_failures;
+                        break;
+                    }
+                }
+            }
+
+            // If optimistic-concurrency retries were exhausted due to high contention,
+            // fall back to a direct upsert so the failure is recorded.
+            if (persistedCount === null) {
+                console.warn(
+                    '[cron-failure-tracker] Optimistic-concurrency retries exhausted for job ' +
+                    `"${jobName}": concurrent writers likely caused a lost increment. ` +
+                    'Falling back to non-atomic upsert — the recorded consecutive_failures count may be understated.'
+                );
+                const { data: existing } = await supabase
+                    .from('cron_job_failures')
+                    .select('consecutive_failures')
+                    .eq('job_name', jobName)
+                    .maybeSingle();
+
+                const fallbackCount = (existing?.consecutive_failures ?? 0) + 1;
+                await supabase.from('cron_job_failures').upsert(
+                    {
+                        job_name: jobName,
+                        consecutive_failures: fallbackCount,
+                        last_failure_at: new Date().toISOString(),
+                        last_error: error,
+                        updated_at: new Date().toISOString(),
+                    },
+                    { onConflict: 'job_name' }
+                );
+                persistedCount = fallbackCount;
+            }
+
+            await this._escalate(jobName, persistedCount, error);
+            return;
+        }
+
+        const newCount = count as number;
         await this._escalate(jobName, newCount, error);
     }
 
@@ -95,11 +181,31 @@ export class CronFailureTrackerService {
     // ── Private ──────────────────────────────────────────────────────────────
 
     private async _escalate(jobName: string, count: number, error: string): Promise<void> {
-        if (count === SLACK_ALERT_THRESHOLD) {
+        const supabase = createClient();
+
+        // Fetch current alert state
+        const { data: row } = await supabase
+            .from('cron_job_failures')
+            .select('slack_alert_sent, email_alert_sent')
+            .eq('job_name', jobName)
+            .single();
+
+        // Slack alert at threshold 3 or above (if not already sent)
+        if (count >= SLACK_ALERT_THRESHOLD && !row?.slack_alert_sent) {
             await this._sendSlackAlert(jobName, count, error);
-        } else if (count === EMAIL_ALERT_THRESHOLD) {
-            await this._sendSlackAlert(jobName, count, error);
-            this._sendEmailAlert(jobName, count, error);
+            await supabase.rpc('mark_cron_alert_sent', {
+                p_job_name: jobName,
+                p_alert_type: 'slack',
+            });
+        }
+
+        // Email alert at threshold 6 or above (if not already sent)
+        if (count >= EMAIL_ALERT_THRESHOLD && !row?.email_alert_sent) {
+            await this._sendEmailAlert(jobName, count, error);
+            await supabase.rpc('mark_cron_alert_sent', {
+                p_job_name: jobName,
+                p_alert_type: 'email',
+            });
         }
     }
 
@@ -124,13 +230,24 @@ export class CronFailureTrackerService {
         }
     }
 
-    private _sendEmailAlert(jobName: string, count: number, error: string): void {
-        console.error('[CRON_EMAIL_ALERT]', {
-            jobName,
-            consecutiveFailures: count,
-            error,
-            timestamp: new Date().toISOString(),
-        });
+    private async _sendEmailAlert(jobName: string, count: number, error: string): Promise<void> {
+        const adminEmail = process.env.ADMIN_EMAIL || 'admin@craft.app';
+        try {
+            await emailDeliveryService.send({
+                type: 'security_alert',
+                to: adminEmail,
+                subject: `Cron Job Alert: ${jobName} Failed ${count} Times`,
+                data: {
+                    jobName,
+                    consecutiveFailures: count,
+                    error,
+                    timestamp: new Date().toISOString(),
+                    alertType: 'cron_failure',
+                },
+            });
+        } catch (err) {
+            console.error('[cron-failure-tracker] Failed to send email alert', err);
+        }
     }
 }
 

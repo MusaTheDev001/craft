@@ -17,6 +17,8 @@ import {
   type RegionalAuthContext,
   type AuthResponse,
 } from './auth-utils.ts';
+import { repairUserStateConsistency } from './consistency-validators.ts';
+import { recoverPartialSignupSync } from './partial-sync-recovery.ts';
 
 interface SignUpRequest {
   email: string;
@@ -182,12 +184,24 @@ async function handleSignUp(req: Request): Promise<Response> {
     );
 
     if (!syncResult.synced) {
-      console.warn(`Profile sync incomplete for user ${userId}:`, syncResult.errors);
+      await recoverPartialSignupSync(
+        { requestId, errors: syncResult.errors },
+        {
+          recordRetryableFailure: (syncFailureRequestId, details) =>
+            logAuthEvent(userId, 'failure', region, syncFailureRequestId, details),
+          repair: () => repairUserStateConsistency(userId, region).then(() => undefined),
+          onRepairFailure: (repairError) =>
+            console.error(`Inline repair failed for user ${userId}:`, repairError),
+        },
+      );
     }
 
-    // Log successful signup
+    // Log successful signup (includes sync outcome so operators have full picture)
     await logAuthEvent(userId, 'signup', region, requestId, {
       email: body.email,
+      syncRegionTimings: syncResult.regionTimings,
+      syncSucceeded: syncResult.synced,
+      ...(syncResult.synced ? {} : { syncErrors: syncResult.errors }),
     });
 
     // Create session

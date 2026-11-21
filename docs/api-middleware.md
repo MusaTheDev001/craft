@@ -352,6 +352,22 @@ export const POST = withRateLimit('deployments:create', DEPLOYMENT_RATE_LIMIT)(
 );
 ```
 
+## CORS and Custom Request Headers
+
+Cross-origin requests are handled by the CORS middleware (`cors.ts`). The allowed request headers are an explicit allowlist — no wildcard (`*`) is used — so only the headers the SDK actually sends are permitted:
+
+| Header | Purpose |
+|--------|---------|
+| `Content-Type` | Declares the request body media type (e.g., `application/json`) |
+| `Authorization` | Carries the Supabase JWT (`Bearer <token>`) |
+| `X-Requested-With` | Identifies XMLHttpRequest-style requests |
+| `API-Version` | Sent by `CraftClient` to select the API version |
+| `Idempotency-Key` | Read by the idempotency middleware to deduplicate mutating requests |
+
+Browser preflight (`OPTIONS`) responses echo this list in `Access-Control-Allow-Headers`, so clients can send `API-Version` and `Idempotency-Key` without being blocked.
+
+Every CORS response also emits `Vary: Origin`. This prevents shared caches from serving a response with one origin's `Access-Control-Allow-Origin` value to a request from a different origin (cache poisoning).
+
 ## Error Handling
 
 ### Error Response Format

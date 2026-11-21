@@ -12,12 +12,20 @@
  *   - Uses crypto.timingSafeEqual() to prevent timing attacks
  *   - Validates signature format (sha256= prefix)
  *   - Returns false for missing or malformed signatures
+ *   - Refuses to verify with an empty/missing secret (never HMACs with a blank key)
  */
 
 import crypto from 'crypto';
 
+/** Ensures the missing-secret error is logged only once per process. */
+let hasLoggedMissingSecret = false;
+
 /**
  * Verifies that a GitHub webhook signature matches the expected HMAC-SHA256.
+ *
+ * An empty or missing secret always returns false and never validates, since
+ * HMAC-ing with a blank key would allow attackers to forge valid signatures.
+ * The missing secret is logged at error level once per process.
  *
  * @param payload - Raw request body as string
  * @param signature - Value from x-hub-signature-256 header
@@ -29,6 +37,17 @@ export function verifyGitHubWebhookSignature(
     signature: string | null,
     secret: string
 ): boolean {
+    // 0. Reject empty/missing secret — never HMAC with a blank key
+    if (!secret) {
+        if (!hasLoggedMissingSecret) {
+            hasLoggedMissingSecret = true;
+            console.error(
+                '[webhook-verification] GitHub webhook secret is missing; refusing to verify signatures'
+            );
+        }
+        return false;
+    }
+
     // 1. Require signature header
     if (!signature) {
         return false;

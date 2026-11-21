@@ -90,7 +90,7 @@ describe('PackageJsonValidator', () => {
 
     // 6. Valid semver ranges in dependencies
     describe('dependency version range acceptance', () => {
-        const validRanges = ['^18.2.0', '~5.0.0', '>=1.0.0'];
+        const validRanges = ['^18.2.0', '~5.0.0', '>=1.0.0', '14.0.4', '>1.0.0', '<=2.5.0', '<3.0.0'];
 
         for (const range of validRanges) {
             it(`accepts dependency version range "${range}"`, () => {
@@ -103,6 +103,59 @@ describe('PackageJsonValidator', () => {
                 expect(depError).toBeUndefined();
             });
         }
+    });
+
+    // 6a. Wildcard and workspace protocol versions
+    describe('wildcard and workspace dependency versions', () => {
+        const validWildcardRanges = [
+            '*',                    // bare wildcard (for internal workspace packages)
+            'workspace:*',          // workspace protocol with wildcard
+            'workspace:^1.2.3',     // workspace protocol with semver
+            'workspace:~2.0.0',     // workspace protocol with tilde
+            'workspace:1.0.0',      // workspace protocol with exact version
+        ];
+
+        for (const range of validWildcardRanges) {
+            it(`accepts wildcard/workspace version "${range}"`, () => {
+                const manifest: PackageManifest = {
+                    ...validManifest,
+                    dependencies: { '@craft/types': range },
+                };
+                const result = packageJsonValidator.validate(manifest);
+                const depError = result.errors.find((e) => e.field === 'dependencies/@craft/types');
+                expect(depError).toBeUndefined();
+            });
+        }
+
+        const invalidWildcardRanges = [
+            'workspace:abc',        // workspace with invalid semver
+            'workspace:',           // workspace prefix without version
+            '^^1.0.0',              // double caret
+            'workspace:*invalid',   // workspace wildcard with suffix
+        ];
+
+        for (const range of invalidWildcardRanges) {
+            it(`rejects invalid version "${range}"`, () => {
+                const manifest: PackageManifest = {
+                    ...validManifest,
+                    dependencies: { pkg: range },
+                };
+                const result = packageJsonValidator.validate(manifest);
+                const depError = result.errors.find((e) => e.field === 'dependencies/pkg');
+                expect(depError).toBeDefined();
+            });
+        }
+    });
+
+    // 6b. Wildcard in devDependencies
+    it('accepts wildcard version in devDependencies', () => {
+        const manifest: PackageManifest = {
+            ...validManifest,
+            devDependencies: { '@craft/types': '*' },
+        };
+        const result = packageJsonValidator.validate(manifest);
+        const depError = result.errors.find((e) => e.field === 'devDependencies/@craft/types');
+        expect(depError).toBeUndefined();
     });
 
     // 7. Missing scripts individually
@@ -193,5 +246,152 @@ describe('PackageJsonValidator', () => {
         const output = packageJsonValidator.format(validManifest);
         const parsed = JSON.parse(output);
         expect(parsed).toEqual(validManifest);
+    });
+
+    // 15. Semver pre-release versions (issue #1223)
+    describe('semver pre-release version acceptance', () => {
+        const preReleaseVersions = [
+            '1.0.0-alpha',
+            '1.0.0-alpha.1',
+            '1.0.0-beta',
+            '1.0.0-beta.2',
+            '2.1.0-rc.1',
+            '0.1.0-dev',
+            '1.0.0-0.3.7',
+        ];
+
+        for (const preRelease of preReleaseVersions) {
+            it(`accepts dependency with pre-release version "${preRelease}"`, () => {
+                const manifest: PackageManifest = {
+                    ...validManifest,
+                    dependencies: { 'test-pkg': preRelease },
+                };
+                const result = packageJsonValidator.validate(manifest);
+                const depError = result.errors.find((e) => e.field === 'dependencies/test-pkg');
+                expect(depError).toBeUndefined();
+            });
+        }
+
+        it('accepts pre-release versions with all supported operators', () => {
+            const operators = ['^', '~', '>=', '>', '<=', '<', ''];
+            for (const op of operators) {
+                const manifest: PackageManifest = {
+                    ...validManifest,
+                    dependencies: { 'test-pkg': `${op}1.0.0-beta.1`.trim() },
+                };
+                const result = packageJsonValidator.validate(manifest);
+                const depError = result.errors.find((e) => e.field === 'dependencies/test-pkg');
+                expect(depError, `${op}1.0.0-beta.1 should be valid`).toBeUndefined();
+            }
+        });
+    });
+
+    // 16. Semver build-metadata versions (issue #1223)
+    describe('semver build-metadata version acceptance', () => {
+        const buildMetadataVersions = [
+            '1.0.0+build',
+            '1.0.0+20130313144700',
+            '1.0.0+build.5',
+            '2.1.0+exp.sha.5114f85',
+            '1.4.0+build.5',
+            '1.0.0+x.7.z.92',
+        ];
+
+        for (const withBuild of buildMetadataVersions) {
+            it(`accepts dependency with build-metadata version "${withBuild}"`, () => {
+                const manifest: PackageManifest = {
+                    ...validManifest,
+                    dependencies: { 'test-pkg': withBuild },
+                };
+                const result = packageJsonValidator.validate(manifest);
+                const depError = result.errors.find((e) => e.field === 'dependencies/test-pkg');
+                expect(depError).toBeUndefined();
+            });
+        }
+
+        it('accepts build-metadata versions with all supported operators', () => {
+            const operators = ['^', '~', '>=', '>', '<=', '<', ''];
+            for (const op of operators) {
+                const manifest: PackageManifest = {
+                    ...validManifest,
+                    dependencies: { 'test-pkg': `${op}1.0.0+build.5`.trim() },
+                };
+                const result = packageJsonValidator.validate(manifest);
+                const depError = result.errors.find((e) => e.field === 'dependencies/test-pkg');
+                expect(depError, `${op}1.0.0+build.5 should be valid`).toBeUndefined();
+            }
+        });
+    });
+
+    // 17. Combined pre-release and build-metadata versions
+    describe('semver pre-release + build-metadata version acceptance', () => {
+        const combinedVersions = [
+            '1.0.0-alpha+build',
+            '1.0.0-beta.1+exp.sha.5114f85',
+            '2.1.0-rc.1+build.5',
+            '1.0.0-0.3.7+20130313144700',
+        ];
+
+        for (const combined of combinedVersions) {
+            it(`accepts dependency with combined pre-release+build-metadata version "${combined}"`, () => {
+                const manifest: PackageManifest = {
+                    ...validManifest,
+                    dependencies: { 'test-pkg': combined },
+                };
+                const result = packageJsonValidator.validate(manifest);
+                const depError = result.errors.find((e) => e.field === 'dependencies/test-pkg');
+                expect(depError).toBeUndefined();
+            });
+        }
+
+        it('accepts combined versions with workspace: prefix', () => {
+            const versions = [
+                'workspace:^1.0.0-alpha+build',
+                'workspace:~1.0.0-beta.1+exp.sha.5114f85',
+                'workspace:2.1.0-rc.1+build.5',
+            ];
+            for (const ver of versions) {
+                const manifest: PackageManifest = {
+                    ...validManifest,
+                    dependencies: { 'test-pkg': ver },
+                };
+                const result = packageJsonValidator.validate(manifest);
+                const depError = result.errors.find((e) => e.field === 'dependencies/test-pkg');
+                expect(depError, `${ver} should be valid`).toBeUndefined();
+            }
+        });
+    });
+
+    // 18. Regression tests for wildcard and workspace handling (issue #898)
+    describe('regression: wildcard and workspace handling', () => {
+        it('still accepts wildcard ranges', () => {
+            const manifest: PackageManifest = {
+                ...validManifest,
+                dependencies: { 'test-pkg': '*' },
+            };
+            const result = packageJsonValidator.validate(manifest);
+            const depError = result.errors.find((e) => e.field === 'dependencies/test-pkg');
+            expect(depError).toBeUndefined();
+        });
+
+        it('still accepts workspace: prefix with exact versions', () => {
+            const manifest: PackageManifest = {
+                ...validManifest,
+                dependencies: { '@internal/pkg': 'workspace:1.0.0' },
+            };
+            const result = packageJsonValidator.validate(manifest);
+            const depError = result.errors.find((e) => e.field === 'dependencies/@internal/pkg');
+            expect(depError).toBeUndefined();
+        });
+
+        it('still accepts workspace: prefix with ranges', () => {
+            const manifest: PackageManifest = {
+                ...validManifest,
+                dependencies: { '@internal/pkg': 'workspace:^1.0.0' },
+            };
+            const result = packageJsonValidator.validate(manifest);
+            const depError = result.errors.find((e) => e.field === 'dependencies/@internal/pkg');
+            expect(depError).toBeUndefined();
+        });
     });
 });

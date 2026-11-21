@@ -168,9 +168,9 @@ export function checkMergeAllowed(
     accountState: AccountState,
     expectedDestination?: string,
 ): MergeDecision {
-    // Check open trustlines (non-zero balance or limit)
+    // Check open trustlines (limit > 0 AND balance > 0, per module documentation)
     const openTrustlines = accountState.trustlines.filter(
-        (t) => Number(t.limit) > 0,
+        (t) => Number(t.limit) > 0 && Number(t.balance) > 0,
     );
     if (openTrustlines.length > 0) {
         return {
@@ -223,8 +223,18 @@ export async function protectAgainstMerge(
     const decisions = new Map<string, MergeDecision>();
 
     for (const merge of merges) {
-        const state = await getAccountState(merge.sourceAccount);
-        const decision = checkMergeAllowed(merge, state, expectedDestination);
+        let decision: MergeDecision;
+
+        // Only apply merge protection rules to registered managed accounts
+        if (!isManagedAccount(merge.sourceAccount)) {
+            decision = {
+                allowed: true,
+                residualXlmStroops: '0',
+            };
+        } else {
+            const state = await getAccountState(merge.sourceAccount);
+            decision = checkMergeAllowed(merge, state, expectedDestination);
+        }
 
         const entry: MergeAuditEntry = {
             timestamp: Date.now(),

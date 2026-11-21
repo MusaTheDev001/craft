@@ -3,6 +3,56 @@ import { costEstimationService, PricingTier, ResourceUsage } from '../../src/ser
 import type { CustomizationConfig } from '@craft/types';
 
 describe('CostEstimationService', () => {
+    describe('Template Complexity Estimation', () => {
+        it('should score deployment complexity from Soroban invocations, enabled features, and compute usage', () => {
+            const result = costEstimationService.calculateTemplateComplexityScore({
+                customizationConfig: {
+                    branding: {
+                        appName: 'Alpha DEX',
+                        primaryColor: '#111827',
+                        secondaryColor: '#7c3aed',
+                        fontFamily: 'Inter',
+                    },
+                    features: {
+                        enableCharts: true,
+                        enableTransactionHistory: true,
+                        enableAnalytics: true,
+                        enableNotifications: false,
+                    },
+                    stellar: {
+                        network: 'mainnet',
+                        horizonUrl: 'https://horizon.stellar.org',
+                        contractAddresses: {
+                            amm: 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA',
+                        },
+                    },
+                },
+                sorobanInvocationCount: 3,
+                vercelComputeUnits: 2.5,
+            });
+
+            expect(result.baseCost).toBe(12.5);
+            expect(result.sorobanInvocations).toBe(3);
+            expect(result.enabledFeatureCount).toBe(3);
+            expect(result.totalCost).toBeCloseTo(31.25, 2);
+            expect(result.complexityScore).toBeCloseTo(31.25, 2);
+        });
+
+        it('should estimate a deployment using default template complexity factors when data is incomplete', () => {
+            const result = costEstimationService.estimateDeploymentCost({
+                customizationConfig: {
+                    branding: { appName: 'Demo', primaryColor: '#000000', secondaryColor: '#ffffff', fontFamily: 'Inter' },
+                    features: { enableCharts: true, enableTransactionHistory: false, enableAnalytics: false, enableNotifications: false },
+                    stellar: { network: 'testnet', horizonUrl: 'https://horizon-testnet.stellar.org' },
+                },
+            });
+
+            expect(result.totalCost).toBeGreaterThan(0);
+            expect(result.currency).toBe('USD');
+            expect(result.breakdown.total).toBeCloseTo(result.totalCost, 2);
+        });
+    });
+
     describe('Pricing Tier Calculation', () => {
         const usage: ResourceUsage = {
             cpuCores: 1,
@@ -146,6 +196,93 @@ describe('CostEstimationService', () => {
         });
     });
 
+    describe('Resource Usage Input Normalization', () => {
+        const baseUsage: ResourceUsage = {
+            cpuCores: 1,
+            memoryGB: 2,
+            storageGB: 10,
+            bandwidthGB: 100,
+            durationHours: 720
+        };
+
+        const invalidValues = [NaN, Infinity, -Infinity, -1, -100];
+
+        const expectFiniteNonNegative = (result: ReturnType<typeof costEstimationService.calculateCost>) => {
+            const values = [
+                result.baseTierCost,
+                result.computeCost,
+                result.storageCost,
+                result.networkCost,
+                result.totalCost
+            ];
+            for (const value of values) {
+                expect(Number.isFinite(value)).toBe(true);
+                expect(value).toBeGreaterThanOrEqual(0);
+            }
+        };
+
+        const fields: Array<keyof ResourceUsage> = [
+            'cpuCores',
+            'memoryGB',
+            'storageGB',
+            'bandwidthGB',
+            'durationHours'
+        ];
+
+        for (const field of fields) {
+            for (const invalidValue of invalidValues) {
+                it(`should normalize ${String(invalidValue)} ${field} to zero`, () => {
+                    const usage: ResourceUsage = { ...baseUsage, [field]: invalidValue };
+                    const result = costEstimationService.calculateCost(usage, 'basic');
+
+                    expectFiniteNonNegative(result);
+                    expect(result.baseTierCost).toBe(10);
+                    expect(result.computeCost).toBe(0);
+                    expect(result.storageCost).toBe(0);
+                    expect(result.networkCost).toBe(0);
+                    expect(result.totalCost).toBe(10);
+                });
+            }
+        }
+
+        it('should normalize all invalid fields at once and fall back to base tier cost', () => {
+            const usage: ResourceUsage = {
+                cpuCores: NaN,
+                memoryGB: -5,
+                storageGB: Infinity,
+                bandwidthGB: -Infinity,
+                durationHours: NaN
+            };
+
+            const result = costEstimationService.calculateCost(usage, 'premium');
+
+            expectFiniteNonNegative(result);
+            expect(result.baseTierCost).toBe(50);
+            expect(result.computeCost).toBe(0);
+            expect(result.storageCost).toBe(0);
+            expect(result.networkCost).toBe(0);
+            expect(result.totalCost).toBe(50);
+        });
+
+        it('should normalize invalid fields while preserving valid overages', () => {
+            const usage: ResourceUsage = {
+                cpuCores: 2,        // valid overage: (2-1) * 0.01 * 100 = $1.00
+                memoryGB: NaN,      // normalized to 0
+                storageGB: -10,     // normalized to 0
+                bandwidthGB: 200,   // valid overage: (200-100) * 0.05 = $5.00
+                durationHours: 100
+            };
+
+            const result = costEstimationService.calculateCost(usage, 'basic');
+
+            expectFiniteNonNegative(result);
+            expect(result.computeCost).toBe(1.00);
+            expect(result.storageCost).toBe(0);
+            expect(result.networkCost).toBe(5.00);
+            expect(result.totalCost).toBe(16.00);
+        });
+    });
+
     describe('Cost Alert Thresholds', () => {
         it('should trigger alert when cost exceeds threshold', () => {
             const result = costEstimationService.checkAlert(120, 100);
@@ -231,6 +368,106 @@ describe('CostEstimationService', () => {
             const diff = Math.abs(estimatedCost - actualStripeCharge);
             const percentDiff = (diff / actualStripeCharge) * 100;
             expect(percentDiff).toBeLessThanOrEqual(10);
+        });
+    });
+
+    describe('Duration Rounding for Partial Billing Hours', () => {
+        it('should round up partial hours to the next billable unit for compute costs', () => {
+            const usageWithPartialHour: ResourceUsage = {
+                cpuCores: 2,
+                memoryGB: 2,
+                storageGB: 10,
+                bandwidthGB: 100,
+                durationHours: 0.5  // Half hour should round up to 1 hour
+            };
+
+            const result = costEstimationService.calculateCost(usageWithPartialHour, 'basic');
+
+            // CPU overage: (2-1) * $0.01 * 1 (rounded up) = $0.01
+            // Memory: included, no overage
+            // Expected compute cost: $0.01
+            expect(result.computeCost).toBeGreaterThan(0);
+            expect(result.computeCost).toBe(0.01);
+        });
+
+        it('should round up 23.4 hours to 24 hours for a full day of deployment', () => {
+            const usage: ResourceUsage = {
+                cpuCores: 2,
+                memoryGB: 4,
+                storageGB: 10,
+                bandwidthGB: 100,
+                durationHours: 23.4  // 23.4 hours should round up to 24 hours
+            };
+
+            const result = costEstimationService.calculateCost(usage, 'basic');
+
+            // CPU overage: (2-1) * $0.01 * 24 (rounded up) = $0.24
+            // Memory overage: (4-2) * $0.005 * 24 = $0.24
+            // Expected compute cost: $0.48
+            expect(result.computeCost).toBe(0.48);
+        });
+
+        it('should handle boundary case of 0.1 hours rounding up to 1 hour', () => {
+            const usage: ResourceUsage = {
+                cpuCores: 2,
+                memoryGB: 2,
+                storageGB: 10,
+                bandwidthGB: 100,
+                durationHours: 0.1
+            };
+
+            const result = costEstimationService.calculateCost(usage, 'basic');
+
+            // Even 0.1 hours should round up to 1 hour for billing
+            // CPU overage: (2-1) * $0.01 * 1 = $0.01
+            expect(result.computeCost).toBe(0.01);
+        });
+
+        it('should not round up when hours are exactly whole numbers', () => {
+            const usage: ResourceUsage = {
+                cpuCores: 2,
+                memoryGB: 4,
+                storageGB: 10,
+                bandwidthGB: 100,
+                durationHours: 24  // Exactly 24 hours
+            };
+
+            const result = costEstimationService.calculateCost(usage, 'basic');
+
+            // CPU overage: (2-1) * $0.01 * 24 = $0.24
+            // Memory overage: (4-2) * $0.005 * 24 = $0.24
+            // Expected compute cost: $0.48
+            expect(result.computeCost).toBe(0.48);
+        });
+
+        it('should round up 0.9 hours to 1 hour for minimal partial hour usage', () => {
+            const usage: ResourceUsage = {
+                cpuCores: 1,
+                memoryGB: 3,  // 1 GB overage
+                storageGB: 10,
+                bandwidthGB: 100,
+                durationHours: 0.9
+            };
+
+            const result = costEstimationService.calculateCost(usage, 'basic');
+
+            // Memory overage: (3-2) * $0.005 * 1 (rounded up) = $0.005
+            expect(result.computeCost).toBe(0.005);
+        });
+
+        it('should round up 30.1 hours to 31 hours for a month-ish deployment', () => {
+            const usage: ResourceUsage = {
+                cpuCores: 2,
+                memoryGB: 2,
+                storageGB: 10,
+                bandwidthGB: 100,
+                durationHours: 30.1
+            };
+
+            const result = costEstimationService.calculateCost(usage, 'basic');
+
+            // CPU overage: (2-1) * $0.01 * 31 (rounded up) = $0.31
+            expect(result.computeCost).toBe(0.31);
         });
     });
 });

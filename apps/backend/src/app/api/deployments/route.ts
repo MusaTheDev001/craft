@@ -59,8 +59,25 @@ deploymentRouter.register('GET', {
   handler: async (req: NextRequest, { supabase, user }: any) => {
     const url = new URL(req.url);
     const cursor = url.searchParams.get('cursor');
-    const limit = Math.min(parseInt(url.searchParams.get('limit') ?? '20'), 100);
-    const direction = url.searchParams.get('direction') ?? 'next';
+
+    const limitParam = url.searchParams.get('limit');
+    const parsedLimit = parseInt(limitParam ?? '20', 10);
+    if (Number.isNaN(parsedLimit) || parsedLimit < 1) {
+      return NextResponse.json(
+        { error: 'Invalid limit parameter. Must be an integer greater than or equal to 1.' },
+        { status: 400 },
+      );
+    }
+    const limit = Math.min(parsedLimit, 100);
+
+    const directionParam = url.searchParams.get('direction');
+    const direction = directionParam ?? 'next';
+    if (direction !== 'next' && direction !== 'prev') {
+      return NextResponse.json(
+        { error: "Invalid direction parameter. Must be 'next' or 'prev'." },
+        { status: 400 },
+      );
+    }
 
     let query = supabase
       .from('deployments')

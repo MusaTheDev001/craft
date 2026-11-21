@@ -17,7 +17,10 @@
 import { isRetryableError, type AppError } from './retryable-error';
 
 export interface RetryConfig {
-    /** Maximum number of attempts (including the first). Default: 3 */
+    /**
+     * Maximum number of attempts (including the first). Default: 3
+     * Minimum: 1 — values below 1 are clamped to 1 so `fn` is always invoked once.
+     */
     maxAttempts?: number;
     /** Base delay in ms before the first retry. Default: 200 */
     baseDelayMs?: number;
@@ -72,12 +75,15 @@ const realSleep = (ms: number): Promise<void> =>
  */
 export async function withRetry<T>(fn: () => Promise<T>, config: RetryConfig = {}): Promise<T> {
     const {
-        maxAttempts = 3,
+        maxAttempts: rawMaxAttempts = 3,
         baseDelayMs = 200,
         maxDelayMs = 10_000,
         isRetryable = defaultIsRetryable,
         sleep = realSleep,
     } = config;
+
+    // Clamp to at least 1 so the operation is always attempted once.
+    const maxAttempts = Math.max(1, rawMaxAttempts);
 
     let lastError: unknown;
 

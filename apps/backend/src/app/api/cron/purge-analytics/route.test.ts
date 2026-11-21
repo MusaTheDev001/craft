@@ -106,11 +106,13 @@ describe('GET /api/cron/purge-analytics', () => {
             expect(mockApplyRetentionPolicy).toHaveBeenCalledWith(30);
         });
 
-        it('passes 0 when ANALYTICS_RETENTION_DAYS=0 disabling the purge', async () => {
+        it('returns a 200 no-op when ANALYTICS_RETENTION_DAYS=0 disabling the purge', async () => {
             process.env.ANALYTICS_RETENTION_DAYS = '0';
             const { GET } = await import('./route');
-            await GET(makeRequest());
-            expect(mockApplyRetentionPolicy).toHaveBeenCalledWith(0);
+            const res = await GET(makeRequest());
+            expect(res.status).toBe(200);
+            expect(await res.json()).toEqual({ deleted: 0, skipped: true });
+            expect(mockApplyRetentionPolicy).not.toHaveBeenCalled();
         });
 
         it('passes a large custom retention window correctly', async () => {

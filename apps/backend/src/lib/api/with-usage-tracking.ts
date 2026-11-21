@@ -45,34 +45,60 @@ export function detectOperationType(pathname: string): string {
 }
 
 /**
- * Middleware to track API usage for metered billing
+ * Middleware to track API usage for metered billing.
+ *
+ * Always the innermost wrapper — apply it closest to the handler, after
+ * withAuth, withRole, and withValidation have all run. This ensures usage is
+ * only recorded for requests that were actually authenticated, permitted,
+ * and well-formed, and — critically — that a request replayed through
+ * withIdempotency (see apps/backend/src/lib/api/idempotency.ts) is served
+ * from the idempotency cache and does not reach this wrapper again, so a
+ * single logical operation is never double-counted. See CONTRIBUTING.md's
+ * "Middleware Composition Order" section for the full rationale.
+ *
+ * @example
+ * ```typescript
+ * export const POST = withRateLimit('deployments:create', DEPLOY_RATE_LIMIT)(
+ *   withAuth(async (req, { user, params }) => {
+ *     const trackedHandler = withUsageTracking(
+ *       async (req, ctx) => {
+ *         const deployment = await createDeployment(user.id, params);
+ *         return NextResponse.json(deployment, { status: 201 });
+ *       },
+ *       'deployment_create'
+ *     );
+ *     return trackedHandler(req, { user, params });
+ *   })
+ * );
+ * ```
  */
-export async function withUsageTracking<TParams = {}>(
+export function withUsageTracking<TParams = {}>(
   handler: (
     req: NextRequest,
     ctx: { user: User; params: TParams; operationType: string }
   ) => Promise<NextResponse>,
-  operationType?: string
+  operationType?: string,
+  quantity: number = 1,
+  metadata?: Record<string, unknown>
 ) {
-  return async (req: NextRequest, { params }: { params: TParams }) => {
+  return async (
+    req: NextRequest,
+    { user, params }: { user: User; params: TParams }
+  ) => {
     // This middleware requires withAuth to be applied first
     // to have the user available in the context
     // See: apps/backend/src/lib/api/with-auth.ts
 
     const opType = operationType || detectOperationType(req.nextUrl.pathname);
 
-    try {
-      const response = await handler(req, { user: {} as any, params, operationType: opType });
+    const response = await handler(req, { user, params, operationType: opType });
 
-      // Track usage after successful response
-      // This requires user context - would be injected by withAuth
-      // TODO: Extract user from session/JWT and track usage
-      // For now, this is a placeholder for the full implementation
-
-      return response;
-    } catch (error) {
-      throw error;
+    // Track usage only after a successful (2xx) response
+    if (response.status >= 200 && response.status < 300) {
+      await trackUsage(user.id, opType, quantity, metadata);
     }
+
+    return response;
   };
 }
 

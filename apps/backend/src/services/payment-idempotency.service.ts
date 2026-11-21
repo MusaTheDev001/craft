@@ -1,5 +1,4 @@
 import { createClient } from '@/lib/supabase/server';
-import { randomBytes } from 'crypto';
 
 /**
  * Payment Idempotency Service
@@ -20,28 +19,71 @@ import { randomBytes } from 'crypto';
 
 export class PaymentIdempotencyService {
   /**
-   * Generate a new idempotency key and store it in the database.
-   * Returns the key to be used with Stripe API.
+   * Return an existing unexpired idempotency key for this logical operation,
+   * or mint and persist a new one if none exists.
+   *
+   * Retried calls for the same (userId, operationType[, requestFingerprint])
+   * within the 24-hour expiry window will receive the same key, allowing
+   * Stripe to short-circuit to its cached response rather than processing a
+   * duplicate charge.
+   *
+   * @param userId           - The user initiating the payment operation.
+   * @param operationType    - The type of payment operation.
+   * @param requestFingerprint - Optional caller-supplied fingerprint that
+   *   further distinguishes otherwise identical operations (e.g. a hash of
+   *   cart contents). When provided, two calls with different fingerprints
+   *   for the same user/operation will each get their own key.
    */
   async generateKey(
     userId: string,
-    operationType: 'checkout_session' | 'subscription' | 'cancel' | 'update'
+    operationType: 'checkout_session' | 'subscription' | 'cancel' | 'update',
+    requestFingerprint?: string,
   ): Promise<string> {
     const supabase = createClient();
-    const key = this.generateRandomKey();
-    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+    const now = new Date().toISOString();
 
-    const { error } = await supabase
+    // ── 1. Look up an existing, unexpired key for this logical operation ──────
+    let lookupQuery = supabase
       .from('payment_idempotency_keys')
-      .insert({
-        user_id: userId,
-        idempotency_key: key,
-        operation_type: operationType,
-        expires_at: expiresAt.toISOString(),
-      });
+      .select('idempotency_key')
+      .eq('user_id', userId)
+      .eq('operation_type', operationType)
+      .gt('expires_at', now);
 
-    if (error) {
-      throw new Error(`Failed to generate idempotency key: ${error.message}`);
+    if (requestFingerprint) {
+      lookupQuery = lookupQuery.eq('request_fingerprint', requestFingerprint);
+    }
+
+    const { data: existing, error: lookupError } = await lookupQuery
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .single();
+
+    // PGRST116 = "no rows returned" — that is the expected cache-miss path.
+    if (lookupError && lookupError.code !== 'PGRST116') {
+      throw new Error(`Failed to look up idempotency key: ${lookupError.message}`);
+    }
+
+    if (existing?.idempotency_key) {
+      return existing.idempotency_key;
+    }
+
+    // Generation and conflict resolution must stay in one database transaction.
+    const { data: key, error: rpcError } = await supabase.rpc(
+      'generate_payment_idempotency_key',
+      {
+        p_user_id: userId,
+        p_operation_type: operationType,
+        p_request_fingerprint: requestFingerprint || null,
+      },
+    );
+
+    if (rpcError) {
+      throw new Error(`Failed to generate idempotency key atomically: ${rpcError.message}`);
+    }
+
+    if (typeof key !== 'string' || key.length === 0) {
+      throw new Error('Failed to generate idempotency key atomically: RPC returned no key');
     }
 
     return key;
@@ -111,15 +153,6 @@ export class PaymentIdempotencyService {
     return data?.length ?? 0;
   }
 
-  /**
-   * Generate a random idempotency key.
-   * Format: idempotency_<random-hex>_<timestamp>
-   */
-  private generateRandomKey(): string {
-    const randomPart = randomBytes(16).toString('hex');
-    const timestamp = Date.now();
-    return `idempotency_${randomPart}_${timestamp}`;
-  }
 }
 
 export const paymentIdempotencyService = new PaymentIdempotencyService();

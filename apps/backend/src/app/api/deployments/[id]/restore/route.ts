@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { withAuth } from '@/lib/api/with-auth';
 import { resolveIpAddress } from '@/lib/api/logger';
-
-const RETENTION_DAYS = parseInt(process.env.DEPLOYMENT_TOMBSTONE_RETENTION_DAYS ?? '30', 10);
+import { readRetentionDays } from '@/lib/retention-policy';
 
 export const POST = withAuth(async (req: NextRequest, { params, user, supabase, log, correlationId }) => {
     const deploymentId = (params as { id: string }).id;
     const ipAddress = resolveIpAddress(req);
+    // Read per request so env changes are honoured and invalid values fall back to the default.
+    const retentionDays = readRetentionDays('tombstonedDeploymentPurge');
 
     // Fetch including tombstoned records so we can restore within the retention window.
     const { data: deployment, error: fetchError } = await supabase
@@ -26,7 +27,7 @@ export const POST = withAuth(async (req: NextRequest, { params, user, supabase, 
 
     // Enforce retention window — records past it are eligible only for purge.
     const deletedAt = new Date(deployment.deleted_at);
-    const cutoff = new Date(Date.now() - RETENTION_DAYS * 24 * 60 * 60 * 1000);
+    const cutoff = new Date(Date.now() - retentionDays * 24 * 60 * 60 * 1000);
     if (deletedAt < cutoff) {
         return NextResponse.json(
             { error: 'Deployment is outside the restore retention window', correlationId },
@@ -34,6 +35,10 @@ export const POST = withAuth(async (req: NextRequest, { params, user, supabase, 
         );
     }
 
+    // Only the tombstone is cleared. Blue-green alias lineage (staging_deployment_id,
+    // production_deployment_id, previous_production_deployment_id — migration 010,
+    // persisted per #995) is intentionally preserved as it was at deletion time,
+    // since soft-delete never touches it. Covered by blue-green-alias-restore.integration.test.ts.
     const { error: restoreError } = await supabase
         .from('deployments')
         .update({ deleted_at: null })

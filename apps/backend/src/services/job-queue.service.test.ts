@@ -36,7 +36,17 @@ function makeSupabaseMock(
     const jobs: JobRecord[] = [...jobRows];
     const dlq: DLQRecord[] = [...dlqRows];
 
-    const mockRpc = vi.fn((_fn: string, { p_worker_id }: { p_worker_id: string }) => {
+    const mockRpc = vi.fn((fn: string, args: Record<string, string>) => {
+        if (fn === 'claim_dlq_reprocess_entry') {
+            const entry = dlq.find((row) => row.id === args.p_dlq_id);
+            if (!entry || entry.reprocess_status !== 'pending') {
+                return Promise.resolve({ data: [], error: null });
+            }
+            entry.reprocess_status = 'in_progress';
+            return Promise.resolve({ data: [entry], error: null });
+        }
+
+        const p_worker_id = args.p_worker_id;
         // Mimic atomic claim: find the highest-priority pending scheduled job
         const priorityOrder: Record<string, number> = { high: 1, normal: 2, low: 3 };
         const candidate = jobs
@@ -88,27 +98,55 @@ function makeSupabaseMock(
         }),
         select: vi.fn().mockReturnThis(),
         update: vi.fn((patch: Partial<JobRecord>) => {
-            const eqChain = (col: string, val: unknown) => {
-                const matchingJobs = jobs.filter((j) => (j as any)[col] === val);
-                matchingJobs.forEach((j) => Object.assign(j, patch));
-                return {
-                    select: vi.fn().mockResolvedValue({ data: matchingJobs, error: null }),
+            // Build a query chain that defers patch application until terminal
+            // .select() so that multiple .eq() filters are ANDed correctly.
+            const makeChain = (sourceJobs: JobRecord[]) => {
+                const filters: Array<(j: JobRecord) => boolean> = [];
+                const apply = () => {
+                    const match = sourceJobs.filter((j) => filters.every((f) => f(j)));
+                    match.forEach((j) => Object.assign(j, patch));
+                    return match;
+                };
+                const chain = {
+                    eq: vi.fn((col: string, val: unknown) => {
+                        filters.push((j: JobRecord) => (j as any)[col] === val);
+                        return chain;
+                    }),
                     lt: vi.fn((col2: string, val2: unknown) => {
-                        const stalledJobs = jobs.filter((j) => {
+                        filters.push((j: JobRecord) => {
                             if (j.status !== 'running') return false;
                             if (!j.started_at) return false;
                             return new Date(j.started_at).getTime() < new Date(val2 as string).getTime();
                         });
-                        stalledJobs.forEach((j) => Object.assign(j, patch));
                         return {
-                            select: vi.fn().mockResolvedValue({ data: stalledJobs, error: null }),
+                            select: vi.fn().mockImplementation(() =>
+                                Promise.resolve({ data: apply(), error: null }),
+                            ),
+                            then: vi.fn((resolve: (result: unknown) => unknown) =>
+                                Promise.resolve(resolve({ data: apply(), error: null }))),
                         };
                     }),
+                    select: vi.fn().mockImplementation(() =>
+                        Promise.resolve({ data: apply(), error: null }),
+                    ),
+                    then: vi.fn((resolve: (result: unknown) => unknown) =>
+                        Promise.resolve(resolve({ data: apply(), error: null }))),
                 };
+                return chain;
             };
-            return { eq: vi.fn(eqChain) };
+            return makeChain(jobs);
         }),
         eq: vi.fn().mockReturnThis(),
+        lt: vi.fn((_col: string, value: unknown) => ({
+            then: vi.fn((resolve: (result: unknown) => unknown) => Promise.resolve(resolve({
+                data: jobs.filter((job) =>
+                    job.status === 'running' &&
+                    job.started_at !== null &&
+                    new Date(job.started_at).getTime() < new Date(value as string).getTime(),
+                ),
+                error: null,
+            }))),
+        })),
         order: vi.fn().mockReturnThis(),
         then: vi.fn().mockImplementation((cb: any) => Promise.resolve(cb({ data: jobs, error: null }))),
     };
@@ -413,6 +451,31 @@ describe('DLQ reprocessing', () => {
         expect(supabase._jobs.some((j: JobRecord) => j.job_type === 'deployment')).toBe(true);
     });
 
+    it('allows only one concurrent reprocess claim for a DLQ entry', async () => {
+        const dlqEntry: DLQRecord = {
+            id: 'dlq-concurrent',
+            original_job_id: 'job-dead-concurrent',
+            job_type: 'deployment',
+            priority: 'high',
+            payload: { userId: 'u1' },
+            failure_reason: 'network error',
+            attempts: 3,
+            reprocess_status: 'pending',
+            reprocessed_at: null,
+            created_at: new Date().toISOString(),
+        };
+        const supabase = makeSupabaseMock([], [dlqEntry]);
+        vi.mocked(createClient).mockReturnValue(supabase as any);
+
+        const outcomes = await Promise.allSettled([
+            new JobQueueService(1).reprocessDLQEntry(dlqEntry.id),
+            new JobQueueService(1).reprocessDLQEntry(dlqEntry.id),
+        ]);
+
+        expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1);
+        expect(supabase._jobs.filter((job) => job.job_type === 'deployment')).toHaveLength(1);
+    });
+
     it('throws when trying to reprocess an already-reprocessed entry', async () => {
         const dlqEntry: DLQRecord = {
             id: 'dlq-2',
@@ -440,6 +503,74 @@ describe('DLQ reprocessing', () => {
         const service = new JobQueueService(1);
 
         await expect(service.reprocessDLQEntry('nonexistent')).rejects.toThrow('not found');
+    });
+
+    it('does not mark as succeeded when enqueue fails', async () => {
+        const dlqEntry: DLQRecord = {
+            id: 'dlq-fail',
+            original_job_id: 'job-dead-3',
+            job_type: 'deployment',
+            priority: 'normal',
+            payload: { userId: 'u1' },
+            failure_reason: 'network error',
+            attempts: 3,
+            reprocess_status: 'pending',
+            reprocessed_at: null,
+            created_at: new Date().toISOString(),
+        };
+
+        const supabase = makeSupabaseMock([], [dlqEntry]);
+        // Make job_queue insert fail so enqueue throws
+        supabase.from('job_queue').insert = vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnThis(),
+            single: vi.fn().mockResolvedValue({ data: null, error: { message: 'Supabase transient error' } }),
+        });
+        vi.mocked(createClient).mockReturnValue(supabase as any);
+        const service = new JobQueueService(1);
+
+        await expect(service.reprocessDLQEntry('dlq-fail')).rejects.toThrow('Supabase transient error');
+
+        // DLQ entry must NOT be marked succeeded
+        expect(supabase._dlq[0].reprocess_status).not.toBe('succeeded');
+        // DLQ entry should be pending so it can be retried
+        expect(supabase._dlq[0].reprocess_status).toBe('pending');
+    });
+
+    it('allows retry after a failed reprocess attempt', async () => {
+        const dlqEntry: DLQRecord = {
+            id: 'dlq-retry',
+            original_job_id: 'job-dead-4',
+            job_type: 'deployment',
+            priority: 'high',
+            payload: { userId: 'u2' },
+            failure_reason: 'timeout',
+            attempts: 3,
+            reprocess_status: 'pending',
+            reprocessed_at: null,
+            created_at: new Date().toISOString(),
+        };
+
+        const supabase = makeSupabaseMock([], [dlqEntry]);
+        // First call fails
+        supabase.from('job_queue').insert = vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnThis(),
+            single: vi.fn().mockResolvedValue({ data: null, error: { message: 'DB down' } }),
+        });
+        vi.mocked(createClient).mockReturnValue(supabase as any);
+        const service = new JobQueueService(1);
+
+        await expect(service.reprocessDLQEntry('dlq-retry')).rejects.toThrow('DB down');
+
+        // Now fix the DB and try again
+        supabase.from('job_queue').insert = vi.fn().mockReturnValue({
+            select: vi.fn().mockReturnThis(),
+            single: vi.fn().mockResolvedValue({ data: { id: 'new-job-ok' }, error: null }),
+        });
+
+        const { jobId } = await service.reprocessDLQEntry('dlq-retry');
+        expect(jobId).toBe('new-job-ok');
+        // DLQ entry should now be succeeded
+        expect(supabase._dlq[0].reprocess_status).toBe('succeeded');
     });
 });
 
@@ -564,6 +695,99 @@ describe('recoverStalledJobs', () => {
 
         // The mock's lt() filter returns the stalled job
         expect(recovered).toBeGreaterThanOrEqual(0); // non-negative
+    });
+
+    it('fencing prevents stale worker completion after recovery and reclaim', async () => {
+        const stalledAt = new Date(Date.now() - STALLED_JOB_TIMEOUT_MS - 1000).toISOString();
+
+        const job: JobRecord = {
+            id: 'job-fencing',
+            job_type: 'test',
+            priority: 'normal',
+            status: 'running',
+            payload: {},
+            attempts: 1,
+            max_attempts: 3,
+            scheduled_at: stalledAt,
+            started_at: stalledAt,
+            worker_id: 'worker-a',
+            created_at: stalledAt,
+            updated_at: stalledAt,
+            result: null,
+            error_message: null,
+            completed_at: null,
+            dead_at: null,
+        };
+
+        const supabase = makeSupabaseMock([job]);
+        vi.mocked(createClient).mockReturnValue(supabase as any);
+        const service = new JobQueueService(1);
+        const staleWorkerSnapshot = { ...job };
+
+        // Step 1: recover the stalled job (sets status back to pending, worker_id to null)
+        await service.recoverStalledJobs();
+        const recoveredJob = supabase._jobs.find((j: JobRecord) => j.id === 'job-fencing');
+        expect(recoveredJob?.status).toBe('pending');
+        expect(recoveredJob?.worker_id).toBeNull();
+
+        // Step 2: worker B claims the recovered job (bumps attempts)
+        // Simulate claim_next_job which increments attempts
+        const { data: claimedData } = await supabase.rpc('claim_next_job', { p_worker_id: 'worker-b' });
+        expect(claimedData).toBeTruthy();
+        const attemptsAfterClaim = claimedData?.[0]?.attempts;
+        // Recovery consumes an attempt, then worker B's claim consumes another.
+        expect(attemptsAfterClaim).toBe(3);
+
+        // Step 3: worker A (original) tries to complete with its stale attempts value
+        // _executeJob's completion UPDATE now includes .eq('attempts', job.attempts)
+        // where job.attempts is still 1 (the stale value from when worker A claimed it)
+        // The DB row now has attempts=2, so the UPDATE should affect 0 rows
+        // We call _executeJob directly with the original job object (still has attempts=1)
+        await (service as any)._executeJob(staleWorkerSnapshot);
+
+        // Verify: the job should still be running (claimed by worker B), not completed
+        const finalJob = supabase._jobs.find((j: JobRecord) => j.id === 'job-fencing');
+        // Worker B claimed it, so it should be running (not completed by stale worker A)
+        expect(finalJob?.status).toBe('running');
+        expect(finalJob?.worker_id).toBe('worker-b');
+        expect(finalJob?.attempts).toBe(3);
+    });
+
+    it('moves a repeatedly stalled job to the DLQ after max_attempts recoveries', async () => {
+        const stalledAt = new Date(Date.now() - STALLED_JOB_TIMEOUT_MS - 1000).toISOString();
+        const job: JobRecord = {
+            id: 'job-repeatedly-stalled',
+            job_type: 'test',
+            priority: 'normal',
+            status: 'running',
+            payload: {},
+            attempts: 0,
+            max_attempts: 3,
+            scheduled_at: stalledAt,
+            started_at: stalledAt,
+            worker_id: 'dead-worker',
+            created_at: stalledAt,
+            updated_at: stalledAt,
+            result: null,
+            error_message: null,
+            completed_at: null,
+            dead_at: null,
+        };
+        const supabase = makeSupabaseMock([job]);
+        vi.mocked(createClient).mockReturnValue(supabase as any);
+        const service = new JobQueueService(1);
+
+        for (let recovery = 0; recovery < job.max_attempts; recovery++) {
+            job.status = 'running';
+            job.started_at = stalledAt;
+            await service.recoverStalledJobs();
+        }
+
+        expect(supabase._dlq).toHaveLength(1);
+        expect(supabase._dlq[0].original_job_id).toBe(job.id);
+        expect(supabase._dlq[0].failure_reason).toContain('stalled');
+        expect(job.status).toBe('dead');
+        expect(job.attempts).toBe(job.max_attempts);
     });
 });
 

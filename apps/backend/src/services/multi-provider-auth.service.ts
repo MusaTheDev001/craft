@@ -26,6 +26,7 @@
  */
 
 import { encryptToken, decryptToken } from '@/lib/github/token-encryption';
+import { clearScopeValidationCacheEntry } from '@/lib/github/scope-validator';
 import type { SupabaseClient } from '@supabase/supabase-js';
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -91,32 +92,23 @@ export class MultiProviderAuthService {
      * Connect a Stellar wallet to the platform identity.
      * Only the public key is stored — the platform never holds the private key.
      * Idempotent — re-connecting replaces the existing public key.
+     *
+    * Uses the set_provider_connection RPC from
+    * 017_provider_connections_atomic_rpc.sql to merge into provider_connections
+    * atomically (single row-locked UPDATE) instead of a client-side
+     * read-modify-write, which would let a concurrent request (e.g. a second
+     * browser tab, or a retried request) silently clobber this change.
      */
     async connectStellar(
         supabase: SupabaseClient,
         userId: string,
         publicKey: string,
     ): Promise<ExchangeResult> {
-        // Read existing provider_connections to merge
-        const { data } = await supabase
-            .from('profiles')
-            .select('provider_connections')
-            .eq('id', userId)
-            .single();
-
-        const existing = (data?.provider_connections as Record<string, unknown>) ?? {};
-        const updated = {
-            ...existing,
-            stellar: { publicKey, connectedAt: new Date().toISOString() },
-        };
-
-        const { error } = await supabase
-            .from('profiles')
-            .update({
-                provider_connections: updated,
-                updated_at: new Date().toISOString(),
-            })
-            .eq('id', userId);
+        const { error } = await supabase.rpc('set_provider_connection', {
+            p_user_id: userId,
+            p_provider: 'stellar',
+            p_value: { publicKey, connectedAt: new Date().toISOString() },
+        });
 
         if (error) throw new Error(`Failed to connect Stellar wallet: ${error.message}`);
 
@@ -133,6 +125,16 @@ export class MultiProviderAuthService {
         provider: OAuthProvider,
     ): Promise<ExchangeResult> {
         if (provider === 'github') {
+            // Retrieve the encrypted token before clearing it so we can
+            // invalidate the matching scope-validation cache entry below.
+            // If the row is missing or already disconnected the token will be
+            // null and there is nothing to evict.
+            const { data: profile } = await supabase
+                .from('profiles')
+                .select('github_token_encrypted')
+                .eq('id', userId)
+                .single();
+
             const { error } = await supabase
                 .from('profiles')
                 .update({
@@ -145,23 +147,30 @@ export class MultiProviderAuthService {
                 .eq('id', userId);
 
             if (error) throw new Error(`Failed to disconnect GitHub: ${error.message}`);
+
+            // Invalidate the in-memory scope-validation cache entry for this
+            // token. Without this a disconnect-then-reconnect cycle that
+            // happens to reuse the same raw token value (common in test/staging
+            // environments and possible in production) would serve a stale
+            // `valid: true` result until the TTL expired.
+            if (profile?.github_token_encrypted) {
+                try {
+                    const plainToken = decryptToken(profile.github_token_encrypted);
+                    clearScopeValidationCacheEntry(plainToken);
+                } catch {
+                    // Decryption failure is non-fatal: the cache entry will
+                    // expire naturally after SCOPE_VALIDATION_CACHE_TTL_MS.
+                }
+            }
         } else {
-            const { data } = await supabase
-                .from('profiles')
-                .select('provider_connections')
-                .eq('id', userId)
-                .single();
-
-            const existing = (data?.provider_connections as Record<string, unknown>) ?? {};
-            const { stellar: _removed, ...rest } = existing as any;
-
-            const { error } = await supabase
-                .from('profiles')
-                .update({
-                    provider_connections: rest,
-                    updated_at: new Date().toISOString(),
-                })
-                .eq('id', userId);
+            // Uses the remove_provider_connection RPC for the same reason
+            // connectStellar uses set_provider_connection: a client-side
+            // read-modify-write here would race with a concurrent connect/
+            // disconnect and silently drop whichever change lost the race.
+            const { error } = await supabase.rpc('remove_provider_connection', {
+                p_user_id: userId,
+                p_provider: 'stellar',
+            });
 
             if (error) throw new Error(`Failed to disconnect Stellar: ${error.message}`);
         }
@@ -177,11 +186,13 @@ export class MultiProviderAuthService {
         supabase: SupabaseClient,
         userId: string,
     ): Promise<ProviderConnectionStatus> {
-        const { data } = await supabase
+        const { data, error } = await supabase
             .from('profiles')
             .select('github_connected, github_token_refreshed_at, provider_connections')
             .eq('id', userId)
             .single();
+
+        if (error) throw new Error(`Failed to fetch connection status: ${error.message}`);
 
         const stellarConn = (data?.provider_connections as any)?.stellar;
 

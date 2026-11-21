@@ -83,6 +83,22 @@ export const DELETE = withAuth(async (req: NextRequest, { params, user, supabase
         },
     });
 
+    // Soft-delete first: stamp the tombstone timestamp rather than hard-deleting.
+    // External cleanup only runs after this succeeds, so a failed soft-delete
+    // never leaves a live deployment pointing at already-deleted resources.
+    const { error: deleteError } = await supabase
+        .from('deployments')
+        .update({ deleted_at: new Date().toISOString() })
+        .eq('id', deploymentId);
+
+    if (deleteError) {
+        log.error(`Soft-delete failed for ${deploymentId}`, deleteError);
+        return NextResponse.json(
+            { error: 'Failed to delete deployment', correlationId },
+            { status: 500 }
+        );
+    }
+
     // Best-effort cleanup of external resources.  Errors are non-fatal.
     if (deployment.repository_url) {
         try {
@@ -102,20 +118,6 @@ export const DELETE = withAuth(async (req: NextRequest, { params, user, supabase
         } catch (error: unknown) {
             log.error(`Vercel cleanup failed for ${deploymentId}`, error);
         }
-    }
-
-    // Soft-delete: stamp the tombstone timestamp rather than hard-deleting.
-    const { error: deleteError } = await supabase
-        .from('deployments')
-        .update({ deleted_at: new Date().toISOString() })
-        .eq('id', deploymentId);
-
-    if (deleteError) {
-        log.error(`Soft-delete failed for ${deploymentId}`, deleteError);
-        return NextResponse.json(
-            { error: 'Failed to delete deployment', correlationId },
-            { status: 500 }
-        );
     }
 
     return NextResponse.json({ success: true, deploymentId });

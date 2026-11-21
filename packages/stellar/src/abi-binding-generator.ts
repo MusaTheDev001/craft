@@ -66,9 +66,9 @@ function resolveUdtTypeName(
   rawName: string,
   udtNames: ReadonlySet<string>,
 ): string {
-  if (udtNames.has(rawName)) return rawName;
+  if (udtNames.has(rawName)) return toValidTsIdentifier(rawName);
   if (rawName.startsWith('ErrorEnum(')) return 'Error';
-  return rawName;
+  return toValidTsIdentifier(rawName);
 }
 
 /**
@@ -239,10 +239,10 @@ export function parseAbi(
         name: e.name().toString(),
         doc: e.doc().toString(),
         cases: Array.from(e.cases() as xdr.ScSpecUdtEnumCaseV0[]).map(
-          (c, idx) => ({
+          (c) => ({
             name: c.name().toString(),
             doc: c.doc().toString(),
-            value: idx,
+            value: c.value(),
           }),
         ),
       });
@@ -253,10 +253,10 @@ export function parseAbi(
         name: e.name().toString(),
         doc: e.doc().toString(),
         cases: Array.from(e.cases() as xdr.ScSpecUdtErrorEnumCaseV0[]).map(
-          (c, idx) => ({
+          (c) => ({
             name: c.name().toString(),
             doc: c.doc().toString(),
-            value: idx,
+            value: c.value(),
           }),
         ),
       });
@@ -283,11 +283,113 @@ function escapeDoc(doc: string, indent: string = ''): string {
   return [`${indent}/**`, ...lines, `${indent} */`].join('\n');
 }
 
+const TYPESCRIPT_RESERVED_WORDS = new Set([
+  'abstract', 'any', 'as', 'asserts', 'await', 'bigint', 'boolean', 'break',
+  'case',
+  'catch', 'class', 'const', 'continue', 'debugger', 'declare', 'default',
+  'delete', 'do', 'else', 'enum', 'export', 'extends', 'false', 'finally',
+  'for', 'function', 'if', 'implements', 'import', 'in', 'infer',
+  'instanceof', 'interface', 'is', 'keyof', 'let', 'module', 'namespace',
+  'never', 'new', 'null', 'number', 'object', 'package', 'private',
+  'protected', 'public', 'readonly', 'return', 'static', 'string', 'super',
+  'switch', 'symbol', 'this', 'throw', 'true', 'try', 'type', 'typeof',
+  'undefined', 'unique', 'unknown', 'var', 'void', 'while', 'with', 'yield',
+]);
+
+/**
+ * Reserved TypeScript keywords and types that cannot be used as bare identifiers.
+ */
+export const TS_RESERVED_WORDS: ReadonlySet<string> = new Set([
+  'break',
+  'case',
+  'catch',
+  'class',
+  'const',
+  'continue',
+  'debugger',
+  'default',
+  'delete',
+  'do',
+  'else',
+  'enum',
+  'export',
+  'extends',
+  'false',
+  'finally',
+  'for',
+  'function',
+  'if',
+  'import',
+  'in',
+  'instanceof',
+  'new',
+  'null',
+  'return',
+  'super',
+  'switch',
+  'this',
+  'throw',
+  'true',
+  'try',
+  'typeof',
+  'var',
+  'void',
+  'while',
+  'with',
+  'as',
+  'implements',
+  'interface',
+  'let',
+  'package',
+  'private',
+  'protected',
+  'public',
+  'static',
+  'yield',
+  'any',
+  'boolean',
+  'constructor',
+  'declare',
+  'get',
+  'module',
+  'require',
+  'number',
+  'set',
+  'string',
+  'symbol',
+  'type',
+  'from',
+  'of',
+  'unknown',
+  'never',
+  'bigint',
+]);
+
+/**
+ * Converts a raw Soroban contract symbol (function, type, parameter, field name)
+ * into a valid TypeScript identifier.
+ *
+ * Rules:
+ * - Replace non-alphanumeric (and non-_/$) characters with `_`
+ * - Prefix names starting with a digit with `_` (e.g. `1swap` -> `_1swap`)
+ * - Suffix reserved TypeScript keywords with `_` (e.g. `class` -> `class_`, `interface` -> `interface_`)
+ */
+export function toValidTsIdentifier(name: string): string {
+  let sanitized = name.replace(/[^a-zA-Z0-9_$]/g, '_');
+  if (/^[0-9]/.test(sanitized)) {
+    sanitized = `_${sanitized}`;
+  }
+  if (TS_RESERVED_WORDS.has(sanitized)) {
+    sanitized = `${sanitized}_`;
+  }
+  return sanitized;
+}
+
 /**
  * Sanitise a name so it can be used as a TypeScript identifier.
  */
 function safeIdent(name: string): string {
-  return name.replace(/[^a-zA-Z0-9_$]/g, '_').replace(/^(\d)/, '_$1');
+  return toValidTsIdentifier(name);
 }
 
 /**
@@ -316,11 +418,12 @@ function generateTypeDefs(parsed: ParsedContractAbi): string {
       }
       lines.push('}');
     } else if (udt.kind === 'union') {
-      // Union → tagged union interface
+      // Union → discriminated union interface with literal tag type
+      const caseNames = (udt.cases ?? []).map((c) => `'${c.name}'`).join(' | ');
       lines.push(
         `export interface ${safeIdent(udt.name)}<T = undefined> {`,
       );
-      lines.push('  tag: string;');
+      lines.push(`  tag: ${caseNames};`);
       lines.push('  values?: T;');
       lines.push('}');
     }
@@ -452,6 +555,29 @@ function specEntriesToBase64(entries: xdr.ScSpecEntry[]): string[] {
 // ---------------------------------------------------------------------------
 
 /**
+ * Detect whether any two distinct raw names in `names` sanitize to the same
+ * `safeIdent` output.  Throws a descriptive error if a collision is found.
+ *
+ * @param names - Array of raw names to check (e.g. function names or UDT names)
+ * @param context - A human-readable label used in the error message (e.g. 'function', 'UDT')
+ */
+function assertNoIdentifierCollisions(names: string[], context: string): void {
+  const seen = new Map<string, string>(); // safeIdent → first raw name
+  for (const raw of names) {
+    const safe = safeIdent(raw);
+    const existing = seen.get(safe);
+    if (existing !== undefined && existing !== raw) {
+      throw new Error(
+        `Identifier collision detected in ${context} names: ` +
+        `"${existing}" and "${raw}" both sanitize to "${safe}". ` +
+        `Rename one of these in the contract before generating bindings.`,
+      );
+    }
+    seen.set(safe, raw);
+  }
+}
+
+/**
  * Generate a complete TypeScript source file that provides type-safe
  * bindings for a Soroban contract from its XDR spec entries.
  *
@@ -482,6 +608,19 @@ export function generateBinding(
   contractName?: string,
 ): string {
   const parsed = parseAbi(specEntries, contractName);
+
+  // ── Collision detection ───────────────────────────────────────────────────
+  // Detect any two distinct function names that map to the same safe identifier.
+  assertNoIdentifierCollisions(
+    parsed.functions.map((f) => f.name),
+    'function',
+  );
+  // Detect any two distinct UDT names that map to the same safe identifier.
+  assertNoIdentifierCollisions(
+    parsed.udts.map((u) => u.name),
+    'UDT',
+  );
+  // ─────────────────────────────────────────────────────────────────────────
 
   let base64: string[];
   if (typeof specEntries[0] === 'string') {

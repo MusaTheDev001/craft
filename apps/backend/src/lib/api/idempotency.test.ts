@@ -16,6 +16,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
     withIdempotency,
     clearIdempotencyCache,
+    evictExpired,
     IDEMPOTENCY_KEY_HEADER,
 } from './idempotency';
 
@@ -129,26 +130,68 @@ describe('withIdempotency — different keys same user', () => {
     });
 });
 
-// ── Non-2xx responses not cached ──────────────────────────────────────────────
+// ── 4xx caching behavior ──────────────────────────────────────────────────────
 
-describe('withIdempotency — non-2xx not cached', () => {
-    it('does not cache 4xx error responses', async () => {
+describe('withIdempotency — 4xx caching', () => {
+    it('caches permanent 4xx errors (422 Unprocessable Entity)', async () => {
         const handler = makeHandler(422, { error: 'Invalid config' });
         const wrapped = withIdempotency('user_a', handler);
 
-        await wrapped(makeRequest('key-err'));
-        await wrapped(makeRequest('key-err'));
+        await wrapped(makeRequest('key-422'));
+        await wrapped(makeRequest('key-422'));
 
-        // Handler called twice — error was not cached
-        expect(handler).toHaveBeenCalledTimes(2);
+        // Handler called once — 422 was cached
+        expect(handler).toHaveBeenCalledTimes(1);
     });
 
+    it('caches other permanent 4xx errors (400, 401, 403, 404)', async () => {
+        for (const status of [400, 401, 403, 404]) {
+            clearIdempotencyCache();
+            const handler = makeHandler(status, { error: 'Client error' });
+            const wrapped = withIdempotency('user_a', handler);
+
+            await wrapped(makeRequest(`key-${status}`));
+            await wrapped(makeRequest(`key-${status}`));
+
+            expect(handler).toHaveBeenCalledTimes(1);
+        }
+    });
+
+    it('does NOT cache transient 4xx errors (408, 429)', async () => {
+        for (const status of [408, 429]) {
+            clearIdempotencyCache();
+            const handler = makeHandler(status, { error: 'Transient error' });
+            const wrapped = withIdempotency('user_a', handler);
+
+            await wrapped(makeRequest(`key-${status}`));
+            await wrapped(makeRequest(`key-${status}`));
+
+            // Handler called twice — transient error was not cached
+            expect(handler).toHaveBeenCalledTimes(2);
+        }
+    });
+});
+
+// ── Non-2xx responses caching policy ───────────────────────────────────────────
+
+describe('withIdempotency — 5xx not cached', () => {
     it('does not cache 5xx error responses', async () => {
         const handler = makeHandler(500, { error: 'Internal server error' });
         const wrapped = withIdempotency('user_a', handler);
 
-        await wrapped(makeRequest('key-err'));
-        await wrapped(makeRequest('key-err'));
+        await wrapped(makeRequest('key-500'));
+        await wrapped(makeRequest('key-500'));
+
+        // Handler called twice — 5xx was not cached
+        expect(handler).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not cache 503 Service Unavailable', async () => {
+        const handler = makeHandler(503, { error: 'Service unavailable' });
+        const wrapped = withIdempotency('user_a', handler);
+
+        await wrapped(makeRequest('key-503'));
+        await wrapped(makeRequest('key-503'));
 
         expect(handler).toHaveBeenCalledTimes(2);
     });
@@ -172,5 +215,238 @@ describe('withIdempotency — TTL expiry', () => {
         await wrapped(makeRequest('key-ttl'));
 
         expect(handler).toHaveBeenCalledTimes(2);
+    });
+});
+
+// ── Non-JSON response bodies ──────────────────────────────────────────────────
+
+describe('withIdempotency — non-JSON response bodies', () => {
+    function makePlainTextHandler(status: number, body: string) {
+        return vi.fn().mockResolvedValue(new NextResponse(body, { status }));
+    }
+
+    it('replays a plain text body faithfully instead of null', async () => {
+        const handler = makePlainTextHandler(200, 'ok');
+        const wrapped = withIdempotency('user_a', handler);
+
+        const r1 = await wrapped(makeRequest('key-plain'));
+        const r2 = await wrapped(makeRequest('key-plain'));
+
+        // Handler called once — response was cached
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(r2.headers.get('Idempotent-Replayed')).toBe('true');
+
+        const body1 = await r1.text();
+        expect(body1).toBe('ok');
+
+        // Replayed response preserves the original plain-text body
+        const body2 = await r2.text();
+        expect(body2).toBe('ok');
+    });
+
+    it('replays an empty body as an empty body', async () => {
+        const handler = makePlainTextHandler(200, '');
+        const wrapped = withIdempotency('user_a', handler);
+
+        const r1 = await wrapped(makeRequest('key-empty'));
+        const r2 = await wrapped(makeRequest('key-empty'));
+
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(r2.headers.get('Idempotent-Replayed')).toBe('true');
+
+        const body1Text = await r1.text();
+        expect(body1Text).toBe('');
+
+        const body2Text = await r2.text();
+        expect(body2Text).toBe('');
+    });
+
+    it('distinguishes between an empty body and a valid JSON null payload', async () => {
+        const handlerEmpty = makePlainTextHandler(200, '');
+        const handlerJsonNull = makeHandler(200, null);
+
+        const wrappedEmpty = withIdempotency('user_a', handlerEmpty);
+        const wrappedJsonNull = withIdempotency('user_b', handlerJsonNull);
+
+        const r1Empty = await wrappedEmpty(makeRequest('key-empty'));
+        const r1JsonNull = await wrappedJsonNull(makeRequest('key-json-null'));
+
+        const bodyEmptyFirst = await r1Empty.text();
+        expect(bodyEmptyFirst).toBe('');
+
+        const bodyJsonNullFirst = await r1JsonNull.json();
+        expect(bodyJsonNullFirst).toBeNull();
+
+        // Replay both requests
+        const rEmpty = await wrappedEmpty(makeRequest('key-empty'));
+        const rJsonNull = await wrappedJsonNull(makeRequest('key-json-null'));
+
+        // Empty body stays empty; JSON null stays JSON null
+        const replayEmpty = await rEmpty.text();
+        expect(replayEmpty).toBe('');
+
+        const replayJsonNull = await rJsonNull.json();
+        expect(replayJsonNull).toBeNull();
+    });
+
+    it('replays an invalid JSON body verbatim', async () => {
+        const handler = makePlainTextHandler(200, '{ invalid json }');
+        const wrapped = withIdempotency('user_a', handler);
+
+        const r1 = await wrapped(makeRequest('key-invalid'));
+        const r2 = await wrapped(makeRequest('key-invalid'));
+
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(r2.headers.get('Idempotent-Replayed')).toBe('true');
+
+        const body1 = await r1.text();
+        expect(body1).toBe('{ invalid json }');
+
+        const body2 = await r2.text();
+        expect(body2).toBe('{ invalid json }');
+    });
+});
+
+// ── Header preservation on replay (#1382) ─────────────────────────────────────
+
+describe('withIdempotency — header preservation on replay (#1382)', () => {
+    it('re-applies a custom header (Location) on the replayed response', async () => {
+        const handler = vi.fn().mockResolvedValue(
+            NextResponse.json(
+                { id: 'dep_1' },
+                {
+                    status: 201,
+                    headers: { Location: '/api/deployments/dep_1' },
+                },
+            ),
+        );
+        const wrapped = withIdempotency('user_a', handler);
+
+        const r1 = await wrapped(makeRequest('key-location'));
+        expect(r1.headers.get('Location')).toBe('/api/deployments/dep_1');
+
+        const r2 = await wrapped(makeRequest('key-location'));
+
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(r2.status).toBe(201);
+        expect(r2.headers.get('Location')).toBe('/api/deployments/dep_1');
+        expect(r2.headers.get('Idempotent-Replayed')).toBe('true');
+
+        const body2 = await r2.json();
+        expect(body2).toEqual({ id: 'dep_1' });
+    });
+
+    it('does not cache or replay Set-Cookie headers', async () => {
+        const handler = vi.fn().mockResolvedValue(
+            NextResponse.json(
+                { id: 'dep_1' },
+                {
+                    status: 201,
+                    headers: {
+                        'Set-Cookie': 'session=secret; HttpOnly',
+                        'X-Custom': 'kept',
+                    },
+                },
+            ),
+        );
+        const wrapped = withIdempotency('user_a', handler);
+
+        const r1 = await wrapped(makeRequest('key-cookie'));
+        expect(r1.headers.get('Set-Cookie')).toContain('session=secret');
+
+        const r2 = await wrapped(makeRequest('key-cookie'));
+
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(r2.headers.get('Idempotent-Replayed')).toBe('true');
+        expect(r2.headers.get('Set-Cookie')).toBeNull();
+        expect(r2.headers.get('X-Custom')).toBe('kept');
+    });
+});
+
+// ── Idempotency-Key validation (#1383) ────────────────────────────────────────
+
+describe('withIdempotency — Idempotency-Key validation (#1383)', () => {
+    it('rejects a 10 KB Idempotency-Key with a 400 naming the header', async () => {
+        const handler = makeHandler(201, { id: 'dep_1' });
+        const wrapped = withIdempotency('user_a', handler);
+
+        const hugeKey = 'a'.repeat(10 * 1024);
+        const res = await wrapped(makeRequest(hugeKey));
+
+        expect(res.status).toBe(400);
+        expect(handler).not.toHaveBeenCalled();
+
+        const body = await res.json();
+        expect(String(body.error ?? '')).toContain(IDEMPOTENCY_KEY_HEADER);
+    });
+
+    it('rejects a key containing control characters with a 400 naming the header', async () => {
+        const handler = makeHandler(201, { id: 'dep_1' });
+        const wrapped = withIdempotency('user_a', handler);
+
+        const res = await wrapped(makeRequest('key-\u0000-\u001f'));
+
+        expect(res.status).toBe(400);
+        expect(handler).not.toHaveBeenCalled();
+
+        const body = await res.json();
+        expect(String(body.error ?? '')).toContain(IDEMPOTENCY_KEY_HEADER);
+    });
+
+    it('still accepts a normal key', async () => {
+        const handler = makeHandler(201, { id: 'dep_1' });
+        const wrapped = withIdempotency('user_a', handler);
+
+        const r1 = await wrapped(makeRequest('normal-key-123'));
+        const r2 = await wrapped(makeRequest('normal-key-123'));
+
+        expect(r1.status).toBe(201);
+        expect(handler).toHaveBeenCalledTimes(1);
+        expect(r2.headers.get('Idempotent-Replayed')).toBe('true');
+    });
+});
+
+// ── Bounded / scheduled eviction (#1048) ──────────────────────────────────────
+
+describe('withIdempotency — bounded cache growth (#1048)', () => {
+    it('evicts expired entries even when no further keyed request arrives', async () => {
+        // Very short TTL so all entries expire quickly.
+        vi.stubEnv('IDEMPOTENCY_TTL_MS', '50');
+
+        const handler = makeHandler(201, { id: 'dep_1' });
+        const wrapped = withIdempotency('user_a', handler);
+
+        // One-shot keys: each used exactly once, then never re-requested.
+        for (let i = 0; i < 200; i++) {
+            await wrapped(makeRequest(`one-shot-${i}`));
+        }
+
+        // No further keyed traffic — but the entries must still expire.
+        await new Promise((r) => setTimeout(r, 80));
+        evictExpired();
+
+        await vi.waitFor(() => {
+            const replay = makeHandler(201, { id: 'dep_1' });
+            const replayedWrapped = withIdempotency('user_a', replay);
+            return replayedWrapped(makeRequest('one-shot-0')).then(() => {
+                expect(replay).toHaveBeenCalledTimes(1);
+            });
+        });
+    });
+
+    it('keeps the cache size bounded under many one-off keys', async () => {
+        // Cap the cache so growth can be asserted deterministically.
+        vi.stubEnv('IDEMPOTENCY_MAX_ENTRIES', '10');
+
+        const handler = makeHandler(201, { id: 'dep_1' });
+        const wrapped = withIdempotency('user_a', handler);
+
+        for (let i = 0; i < 500; i++) {
+            await wrapped(makeRequest(`cap-${i}`));
+        }
+
+        // Cache must never exceed the configured cap (oldest evicted on write).
+        const { _cacheSize } = await import('./idempotency');
+        expect(_cacheSize()).toBeLessThanOrEqual(10);
     });
 });

@@ -1,3 +1,13 @@
+/**
+ * Canary & Blue-Green Deployment Rollout Strategies
+ *
+ * Implements `RolloutEngine` (percentage-based canary rollout with
+ * auto-rollback) and `BlueGreenSwitcher` (blue/green traffic switching).
+ *
+ * Not to be confused with `./feature-flag-engine.ts`, which implements the
+ * standalone feature-flag targeting/evaluation engine (`FlagEngine`).
+ */
+
 export type DeploymentColor = 'blue' | 'green';
 export type RolloutStatus = 'pending' | 'in_progress' | 'promoted' | 'rolled_back';
 
@@ -36,15 +46,47 @@ function invalidateFlagCache(flagKey?: string): void {
     }
 }
 
+function hashIdentityToBucket(identity: string): number {
+    let hash = 2166136261;
+    for (let i = 0; i < identity.length; i++) {
+        hash ^= identity.charCodeAt(i);
+        hash = Math.imul(hash, 16777619);
+    }
+    return Math.abs(hash >>> 0) % 100;
+}
+
+export interface RolloutThresholdConfig {
+    /** Overrides ROLLBACK_ERROR_RATE_THRESHOLD for this rollout. Must be > 0. */
+    errorRateThreshold?: number;
+    /** Overrides ROLLBACK_LATENCY_THRESHOLD_MS for this rollout. Must be > 0. */
+    latencyThresholdMs?: number;
+}
+
 export class RolloutEngine {
     private _canaryPercent = 0;
     private _status: RolloutStatus = 'pending';
     private _requestCounter = 0;
+    private readonly errorRateThreshold: number;
+    private readonly latencyThresholdMs: number;
 
     constructor(
         private readonly stable: DeploymentVersion,
         private readonly candidate: DeploymentVersion,
-    ) {}
+        thresholds: RolloutThresholdConfig = {},
+    ) {
+        const errorRateThreshold = thresholds.errorRateThreshold ?? ROLLBACK_ERROR_RATE_THRESHOLD;
+        const latencyThresholdMs = thresholds.latencyThresholdMs ?? ROLLBACK_LATENCY_THRESHOLD_MS;
+
+        if (!(errorRateThreshold > 0)) {
+            throw new RangeError('errorRateThreshold must be a positive number');
+        }
+        if (!(latencyThresholdMs > 0)) {
+            throw new RangeError('latencyThresholdMs must be a positive number');
+        }
+
+        this.errorRateThreshold = errorRateThreshold;
+        this.latencyThresholdMs = latencyThresholdMs;
+    }
 
     evaluateFlagWithCache(userId: string, flagKey: string, evaluator: () => boolean): boolean {
         const cacheKey = buildFlagCacheKey(userId, flagKey);
@@ -87,20 +129,38 @@ export class RolloutEngine {
         this._status = percent === 0 ? 'pending' : percent === 100 ? 'promoted' : 'in_progress';
     }
 
-    routeRequest(): DeploymentVersion {
+    /**
+     * Routes a request to either candidate (canary) or stable deployment.
+     * When an identity is provided (e.g. userId, sessionId), routing is deterministic
+     * and sticky across requests for the same rollout configuration.
+     * If no identity is provided, falls back to a shared request counter.
+     */
+    routeRequest(identity?: string): DeploymentVersion {
+        if (identity !== undefined && identity !== '') {
+            const bucket = hashIdentityToBucket(identity);
+            const useCanary = bucket < this._canaryPercent;
+            return useCanary ? this.candidate : this.stable;
+        }
+
         this._requestCounter += 1;
         const useCanary = (this._requestCounter % 100) < this._canaryPercent;
         return useCanary ? this.candidate : this.stable;
     }
 
-    simulateTraffic(requestCount: number): Record<string, number> {
+    simulateTraffic(
+        requestCount: number,
+        identityGenerator?: (index: number) => string
+    ): Record<string, number> {
         const counts: Record<string, number> = {
             [this.stable.id]: 0,
             [this.candidate.id]: 0,
         };
 
         for (let i = 0; i < requestCount; i += 1) {
-            const servedBy = this.routeRequest();
+            const identity = identityGenerator
+                ? identityGenerator(i)
+                : `user-sim-${i}`;
+            const servedBy = this.routeRequest(identity);
             counts[servedBy.id] = (counts[servedBy.id] ?? 0) + 1;
         }
 
@@ -109,8 +169,8 @@ export class RolloutEngine {
 
     evaluateAndMaybeRollback(): boolean {
         const shouldRollback =
-            this.candidate.errorRate >= ROLLBACK_ERROR_RATE_THRESHOLD ||
-            this.candidate.p99LatencyMs > ROLLBACK_LATENCY_THRESHOLD_MS;
+            this.candidate.errorRate >= this.errorRateThreshold ||
+            this.candidate.p99LatencyMs > this.latencyThresholdMs;
 
         if (shouldRollback) {
             this._canaryPercent = 0;

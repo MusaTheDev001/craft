@@ -258,6 +258,7 @@ describe('protectAgainstMerge', () => {
     });
 
     it('records blocked merges in the audit log', async () => {
+        registerManagedAccount(SOURCE_KP.publicKey());
         const txXdr = buildMergeTxXdr(SOURCE_KP, DEST_KP.publicKey());
         const getState = vi.fn().mockResolvedValue(
             makeAccountState({
@@ -271,6 +272,85 @@ describe('protectAgainstMerge', () => {
         const log = getMergeAuditLog();
         expect(log[0].decision.allowed).toBe(false);
     });
+
+    it('allows unmanaged account merges without calling getAccountState (#1127)', async () => {
+        const unregisteredKp = Keypair.random();
+        const txXdr = buildMergeTxXdr(unregisteredKp, DEST_KP.publicKey());
+        const getState = vi.fn();
+
+        const decisions = await protectAgainstMerge(txXdr, NETWORK, getState);
+
+        // Unmanaged accounts should bypass state checking entirely
+        expect(decisions.get(unregisteredKp.publicKey())?.allowed).toBe(true);
+        expect(getState).not.toHaveBeenCalled();
+    });
+
+    it('records audit entry for unmanaged account merge (#1127)', async () => {
+        const unregisteredKp = Keypair.random();
+        const txXdr = buildMergeTxXdr(unregisteredKp, DEST_KP.publicKey());
+        const getState = vi.fn().mockResolvedValue(makeAccountState());
+
+        await protectAgainstMerge(txXdr, NETWORK, getState);
+
+        const log = getMergeAuditLog();
+        expect(log).toHaveLength(1);
+        expect(log[0].sourceAccount).toBe(unregisteredKp.publicKey());
+        expect(log[0].decision.allowed).toBe(true);
+    });
+
+    it('allows unmanaged account merges even with open trustlines (#956)', async () => {
+        const unregisteredKp = Keypair.random();
+        const txXdr = buildMergeTxXdr(unregisteredKp, DEST_KP.publicKey());
+        const getState = vi.fn().mockResolvedValue(
+            makeAccountState({
+                trustlines: [{ assetCode: 'USDC', assetIssuer: 'GABC', balance: '50', limit: '1000' }],
+            }),
+        );
+
+        const decisions = await protectAgainstMerge(txXdr, NETWORK, getState);
+
+        expect(decisions.get(unregisteredKp.publicKey())?.allowed).toBe(true);
+        expect(getState).not.toHaveBeenCalled();
+        const log = getMergeAuditLog();
+        expect(log[0].decision.allowed).toBe(true);
+    });
+
+    it('blocks managed account merges with open trustlines (#956)', async () => {
+        registerManagedAccount(SOURCE_KP.publicKey());
+        const txXdr = buildMergeTxXdr(SOURCE_KP, DEST_KP.publicKey());
+        const getState = vi.fn().mockResolvedValue(
+            makeAccountState({
+                trustlines: [{ assetCode: 'USDC', assetIssuer: 'GABC', balance: '50', limit: '1000' }],
+            }),
+        );
+
+        const decisions = await protectAgainstMerge(txXdr, NETWORK, getState);
+
+        expect(decisions.get(SOURCE_KP.publicKey())?.allowed).toBe(false);
+        expect(getState).toHaveBeenCalledOnce();
+        const log = getMergeAuditLog();
+        expect(log[0].decision.allowed).toBe(false);
+    });
+
+    it('emits audit entries for both managed and unmanaged account merges (#956)', async () => {
+        const managedKp = SOURCE_KP;
+        const unmanagedKp = Keypair.random();
+
+        registerManagedAccount(managedKp.publicKey());
+
+        const managedTxXdr = buildMergeTxXdr(managedKp, DEST_KP.publicKey());
+        const unmanagedTxXdr = buildMergeTxXdr(unmanagedKp, DEST_KP.publicKey());
+
+        const getState = vi.fn().mockResolvedValue(makeAccountState());
+
+        await protectAgainstMerge(managedTxXdr, NETWORK, getState);
+        await protectAgainstMerge(unmanagedTxXdr, NETWORK, getState);
+
+        const log = getMergeAuditLog();
+        expect(log).toHaveLength(2);
+        expect(log[0].sourceAccount).toBe(managedKp.publicKey());
+        expect(log[1].sourceAccount).toBe(unmanagedKp.publicKey());
+    });
 });
 
 // ---------------------------------------------------------------------------
@@ -282,5 +362,60 @@ describe('managed-account registry', () => {
         expect(isManagedAccount(SOURCE_KP.publicKey())).toBe(false);
         registerManagedAccount(SOURCE_KP.publicKey());
         expect(isManagedAccount(SOURCE_KP.publicKey())).toBe(true);
+    });
+});
+
+// ── Regression: #1100 – balance check in open-trustline filter ───────────────
+
+describe('regression #1100 – zero-balance trustline must not block merge', () => {
+    it('allows merge when trustline has nonzero limit but zero balance', () => {
+        const merge: MergeOperation = {
+            sourceAccount: SOURCE_KP.publicKey(),
+            destination: DEST_KP.publicKey(),
+        };
+        // limit > 0, balance === '0' — not an "open" trustline per the docs
+        const state = makeAccountState({
+            trustlines: [
+                { assetCode: 'USDC', assetIssuer: 'GABC...', balance: '0', limit: '1000' },
+            ],
+        });
+
+        const decision = checkMergeAllowed(merge, state);
+
+        expect(decision.allowed).toBe(true);
+    });
+
+    it('allows merge when trustline has nonzero limit and zero decimal-string balance', () => {
+        const merge: MergeOperation = {
+            sourceAccount: SOURCE_KP.publicKey(),
+            destination: DEST_KP.publicKey(),
+        };
+        const state = makeAccountState({
+            trustlines: [
+                { assetCode: 'BTC', assetIssuer: 'GBBB...', balance: '0.0000000', limit: '500' },
+            ],
+        });
+
+        const decision = checkMergeAllowed(merge, state);
+
+        expect(decision.allowed).toBe(true);
+    });
+
+    it('still blocks merge when trustline has both nonzero limit and nonzero balance', () => {
+        const merge: MergeOperation = {
+            sourceAccount: SOURCE_KP.publicKey(),
+            destination: DEST_KP.publicKey(),
+        };
+        const state = makeAccountState({
+            trustlines: [
+                { assetCode: 'USDC', assetIssuer: 'GABC...', balance: '1', limit: '1000' },
+            ],
+        });
+
+        const decision = checkMergeAllowed(merge, state);
+
+        expect(decision.allowed).toBe(false);
+        if (decision.allowed) return;
+        expect(decision.reason).toMatch(/trustline/);
     });
 });

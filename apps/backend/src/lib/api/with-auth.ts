@@ -26,6 +26,27 @@ type RouteHandler<TParams = {}> = (
  * Wraps a route handler with Supabase session authentication.
  * Returns 401 if the user is not authenticated.
  * Attaches a correlation ID and logger to the context via withLogging.
+ *
+ * Compose with withRateLimit / withValidation / withUsageTracking — see
+ * CONTRIBUTING.md's "Middleware Composition Order" section for why the
+ * nesting order below matters (rate-limit outermost, auth before any
+ * role/tier check, usage-tracking innermost).
+ *
+ * @example
+ * ```typescript
+ * export const POST = withRateLimit('deployments:create', DEPLOY_RATE_LIMIT)(
+ *   withAuth(async (req, { user, params }) => {
+ *     const trackedHandler = withUsageTracking(
+ *       async (req, ctx) => {
+ *         const deployment = await createDeployment(user.id, params);
+ *         return NextResponse.json(deployment, { status: 201 });
+ *       },
+ *       'deployment_create'
+ *     );
+ *     return trackedHandler(req, { params });
+ *   })
+ * );
+ * ```
  */
 export function withAuth<TParams = {}>(handler: RouteHandler<TParams>) {
     return withLogging<TParams>(async (req, { params, correlationId, log }) => {
@@ -42,22 +63,46 @@ export function withAuth<TParams = {}>(handler: RouteHandler<TParams>) {
 
 /**
  * Wraps a route handler with auth + deployment ownership check.
- * Returns 401 if unauthenticated, 403 if the deployment doesn't belong to the user.
+ *
+ * Status mapping:
+ * - 401 if the user is unauthenticated (from withAuth).
+ * - 404 if the deployment is missing, soft-deleted, or owned by another user.
+ *   The response body is identical in all of these cases so that callers
+ *   cannot distinguish "does not exist" from "not yours", avoiding leaking
+ *   the existence of other users' deployments.
+ * - 500 if the Supabase query fails for any reason other than "no rows"
+ *   (PGRST116), which is the expected outcome for a missing deployment.
+ *
  * Requires `params.id` to be the deployment ID.
  */
 export function withDeploymentAuth<TParams extends { id: string }>(
     handler: RouteHandler<TParams>
 ) {
     return withAuth<TParams>(async (req, ctx) => {
-        const { data: deployment } = await ctx.supabase
+        const { data: deployment, error } = await ctx.supabase
             .from('deployments')
             .select('user_id')
             .eq('id', ctx.params.id)
             .is('deleted_at', null)
             .single();
 
+        if (error && error.code !== 'PGRST116') {
+            ctx.log.error('Failed to load deployment for auth check', {
+                deploymentId: ctx.params.id,
+                error: error.message,
+                code: error.code,
+            });
+            return NextResponse.json(
+                { error: 'Internal Server Error' },
+                { status: 500 }
+            );
+        }
+
         if (!deployment || deployment.user_id !== ctx.user.id) {
-            return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+            return NextResponse.json(
+                { error: 'Deployment not found' },
+                { status: 404 }
+            );
         }
 
         return handler(req, ctx);

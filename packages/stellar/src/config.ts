@@ -19,24 +19,129 @@ export const SOROBAN_RPC_URLS = {
 
 type Network = 'mainnet' | 'testnet';
 
-function resolveNetwork(): Network {
-  const raw = process.env.STELLAR_NETWORK ?? process.env.NEXT_PUBLIC_STELLAR_NETWORK;
-  return raw === 'mainnet' ? 'mainnet' : 'testnet';
+/**
+ * Parses a raw network identifier into a canonical `Network`.
+ *
+ * Shared by `resolveNetwork` and `resolveStellarNetworkConfig` so both
+ * resolvers behave identically:
+ * - Trims surrounding whitespace (e.g. `" mainnet "` → `mainnet`).
+ * - Normalises case (e.g. `"MAINNET"` → `mainnet`).
+ * - Logs a warning and defaults to `testnet` for unknown or missing values.
+ *
+ * @param raw - The raw network value (may be undefined).
+ * @returns The canonical network identifier.
+ */
+export function parseNetwork(raw: string | undefined): Network {
+  if (raw === undefined) {
+    return 'testnet';
+  }
+  const normalised = raw.trim().toLowerCase();
+  if (normalised === 'mainnet') {
+    return 'mainnet';
+  }
+  if (normalised === 'testnet') {
+    return 'testnet';
+  }
+  console.warn(`Unrecognized STELLAR_NETWORK value: "${raw}". Expected 'mainnet' or 'testnet'. Defaulting to 'testnet'.`);
+  return 'testnet';
 }
 
+function resolveNetwork(): Network {
+  return parseNetwork(process.env.STELLAR_NETWORK ?? process.env.NEXT_PUBLIC_STELLAR_NETWORK);
+}
+
+/**
+ * Returns a validated override URL, or `undefined` when the override is unset
+ * or rejected. Overrides must use `https://` to avoid downgrading transport
+ * security; non-https values are ignored with a warning so callers fall back
+ * to the hard-coded default.
+ */
+function resolveHttpsOverride(raw: string | undefined, name: string): string | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  if (!raw.startsWith('https://')) {
+    console.warn(`Ignoring ${name} override: "${raw}" must use https://. Falling back to default.`);
+    return undefined;
+  }
+  return raw;
+}
+
+/**
+ * Resolves the effective network passphrase for a network.
+ *
+ * Honours the `NEXT_PUBLIC_NETWORK_PASSPHRASE` override when set, otherwise
+ * falls back to the hard-coded public/testnet constants. Shared by
+ * `getNetworkPassphrase` and `validateNetworkPassphrase` so both agree on the
+ * configured value.
+ */
+function resolveNetworkPassphrase(net: Network): string {
+  return process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE || NETWORK_PASSPHRASES[net];
+}
+
+/**
+ * Returns the Stellar network configuration for the given (or resolved)
+ * network.
+ *
+ * Precedence: `NEXT_PUBLIC_HORIZON_URL` and `NEXT_PUBLIC_SOROBAN_RPC_URL`
+ * overrides take precedence over the hard-coded defaults when set to a valid
+ * `https://` URL. Unset or non-https overrides fall back to the defaults.
+ */
 export function getNetworkConfig(network?: Network): StellarNetworkConfig {
   const net = network ?? resolveNetwork();
   return {
     network: net,
-    horizonUrl: HORIZON_URLS[net],
-    networkPassphrase: NETWORK_PASSPHRASES[net],
-    sorobanRpcUrl: SOROBAN_RPC_URLS[net],
+    horizonUrl:
+      resolveHttpsOverride(process.env.NEXT_PUBLIC_HORIZON_URL, 'NEXT_PUBLIC_HORIZON_URL') ??
+      HORIZON_URLS[net],
+    networkPassphrase: resolveNetworkPassphrase(net),
+    sorobanRpcUrl:
+      resolveHttpsOverride(process.env.NEXT_PUBLIC_SOROBAN_RPC_URL, 'NEXT_PUBLIC_SOROBAN_RPC_URL') ??
+      SOROBAN_RPC_URLS[net],
+  };
+}
+
+/**
+ * Resolves Stellar network configuration from environment variables, with support for overrides.
+ * Allows templates to customize network endpoints via NEXT_PUBLIC_* vars.
+ *
+ * Environment variables (in priority order):
+ * - NEXT_PUBLIC_STELLAR_NETWORK: 'mainnet' or 'testnet' (default: 'testnet')
+ * - NEXT_PUBLIC_HORIZON_URL: custom Horizon endpoint (overrides default)
+ * - NEXT_PUBLIC_NETWORK_PASSPHRASE: custom network passphrase (overrides default)
+ * - NEXT_PUBLIC_SOROBAN_RPC_URL: custom Soroban RPC endpoint (overrides default)
+ *
+ * @param env - Object of environment variables (typically process.env)
+ * @returns Resolved Stellar network configuration
+ *
+ * @example
+ * ```typescript
+ * const config = resolveStellarNetworkConfig(process.env);
+ * // Uses defaults: testnet Horizon/Soroban RPC with Test SDF Network passphrase
+ *
+ * const config = resolveStellarNetworkConfig({
+ *   NEXT_PUBLIC_STELLAR_NETWORK: 'mainnet',
+ *   NEXT_PUBLIC_HORIZON_URL: 'https://custom-horizon.example.com',
+ * });
+ * // Uses mainnet with custom Horizon URL but default mainnet passphrase/Soroban RPC
+ * ```
+ */
+export function resolveStellarNetworkConfig(env: Record<string, string | undefined>): StellarNetworkConfig {
+  const network = parseNetwork(env.NEXT_PUBLIC_STELLAR_NETWORK);
+  return {
+    network,
+    horizonUrl: env.NEXT_PUBLIC_HORIZON_URL || HORIZON_URLS[network],
+    networkPassphrase: env.NEXT_PUBLIC_NETWORK_PASSPHRASE || NETWORK_PASSPHRASES[network],
+    sorobanRpcUrl: env.NEXT_PUBLIC_SOROBAN_RPC_URL || SOROBAN_RPC_URLS[network],
   };
 }
 
 /**
  * Validates that a transaction's network passphrase matches the target network.
  * Prevents cross-network transaction replay attacks.
+ *
+ * Honours the `NEXT_PUBLIC_NETWORK_PASSPHRASE` override: when set, only that
+ * configured value is accepted (strict matching).
  *
  * @param transactionPassphrase - The passphrase used to sign the transaction
  * @param targetNetwork - The target network ('mainnet' or 'testnet')
@@ -52,17 +157,62 @@ export function validateNetworkPassphrase(
   targetNetwork?: Network
 ): void {
   const net = targetNetwork ?? resolveNetwork();
-  const expectedPassphrase = NETWORK_PASSPHRASES[net];
+  const expectedPassphrase = resolveNetworkPassphrase(net);
 
   if (transactionPassphrase !== expectedPassphrase) {
     throw new NetworkMismatchError(transactionPassphrase, expectedPassphrase, net);
   }
 }
 
-/** Default config resolved from environment variables. */
-export const config = {
-  stellar: getNetworkConfig(),
-} as const;
+/**
+ * Get the Soroban RPC URL for the current or specified network.
+ * Respects NEXT_PUBLIC_SOROBAN_RPC_URL env var override.
+ */
+export function getSorobanRpcUrl(network?: Network): string {
+  return (
+    process.env.NEXT_PUBLIC_SOROBAN_RPC_URL ||
+    SOROBAN_RPC_URLS[network ?? resolveNetwork()]
+  );
+}
+
+/**
+ * Get the network passphrase for the current or specified network.
+ * Respects the NEXT_PUBLIC_NETWORK_PASSPHRASE env var override.
+ */
+export function getNetworkPassphrase(network?: Network): string {
+  const net = network ?? resolveNetwork();
+  return resolveNetworkPassphrase(net);
+}
+
+/**
+ * Default config object whose `stellar` property is resolved fresh on every
+ * access via a getter, so that changes to `STELLAR_NETWORK` /
+ * `NEXT_PUBLIC_STELLAR_NETWORK` after module load are always reflected.
+ *
+ * Callers that need a one-time snapshot can still call `getNetworkConfig()`
+ * directly; that remains the recommended approach for most use-cases.
+ *
+ * @example
+ * ```ts
+ * // Live read — always picks up the current env var:
+ * const { network } = config.stellar;
+ *
+ * // Snapshot — freeze the value at call-time:
+ * const snapshot = getNetworkConfig();
+ * ```
+ */
+export const config: { readonly stellar: ReturnType<typeof getNetworkConfig> } = Object.defineProperties(
+  {} as { readonly stellar: ReturnType<typeof getNetworkConfig> },
+  {
+    stellar: {
+      get(): ReturnType<typeof getNetworkConfig> {
+        return getNetworkConfig();
+      },
+      enumerable: true,
+      configurable: false,
+    },
+  },
+);
 
 export default config;
 
@@ -92,67 +242,6 @@ export default config;
  * ```
  */
 export interface HorizonFailoverConfig {
-  /** Ordered list of Horizon URLs. First entry is the primary. */
-  endpoints: string[];
-  /** Milliseconds before an unhealthy endpoint is retried. Default: 30 000. */
-  recoveryMs?: number;
-}
+  /** Ordered list of Horizon URLs. First entry is the prim
 
-export interface HorizonFailover {
-  /** Returns the best available endpoint (prefers healthy, falls back to primary). */
-  selectEndpoint(): string;
-  /** Mark an endpoint as unhealthy after a failed request. */
-  markUnhealthy(url: string): void;
-  /** Mark an endpoint as healthy (called after a successful request). */
-  markHealthy(url: string): void;
-}
-
-/**
- * Creates a stateful Horizon failover manager.
- *
- * Endpoint health is tracked in memory. The primary endpoint (index 0) is
- * preferred; secondary endpoints are used only when the primary is unhealthy.
- * Recovery is time-based: an endpoint becomes eligible again after `recoveryMs`.
- */
-export function createHorizonFailover(cfg: HorizonFailoverConfig): HorizonFailover {
-  const { endpoints, recoveryMs = 30_000 } = cfg;
-  if (endpoints.length === 0) throw new Error('At least one Horizon endpoint is required');
-
-  // Map<url, unhealthySince (ms timestamp)>
-  const unhealthyUntil = new Map<string, number>();
-
-  function isHealthy(url: string): boolean {
-    const until = unhealthyUntil.get(url);
-    if (until === undefined) return true;
-    if (Date.now() >= until) {
-      unhealthyUntil.delete(url);
-      return true;
-    }
-    return false;
-  }
-
-  return {
-    selectEndpoint(): string {
-      for (const url of endpoints) {
-        if (isHealthy(url)) return url;
-      }
-      // All unhealthy — return primary as last resort
-      return endpoints[0];
-    },
-    markUnhealthy(url: string): void {
-      unhealthyUntil.set(url, Date.now() + recoveryMs);
-    },
-    markHealthy(url: string): void {
-      unhealthyUntil.delete(url);
-    },
-  };
-}
-
-/**
- * Default per-network failover instances built from the standard endpoint lists.
- * Override by calling `createHorizonFailover` with custom endpoint arrays.
- */
-export const HORIZON_FAILOVER_ENDPOINTS: Record<Network, string[]> = {
-  mainnet: [HORIZON_URLS.mainnet],
-  testnet: [HORIZON_URLS.testnet],
-};
+/* … truncated 1658 chars — edit only what you need near the top … */

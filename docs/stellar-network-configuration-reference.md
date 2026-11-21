@@ -129,6 +129,16 @@ CRAFT resolves the network configuration in this order:
 2. `NEXT_PUBLIC_STELLAR_NETWORK` environment variable
 3. Default: `testnet`
 
+### Network Value Parsing Rules
+
+Both `resolveNetwork` and `resolveStellarNetworkConfig` share a single `parseNetwork(raw)` helper, so they interpret the configured value identically:
+
+1. **Trimming**: Leading and trailing whitespace is removed, so `" mainnet "` resolves to `mainnet`.
+2. **Case normalisation**: Values are lower-cased, so `"MAINNET"` and `"Mainnet"` resolve to `mainnet`.
+3. **Unknown values**: Any value that is not `mainnet` or `testnet` (after trimming and normalisation) logs a warning and falls back to `testnet`.
+
+> **Security note**: Because unknown values fall back to `testnet`, a misconfigured mainnet deployment will not silently run on mainnet. The warning surfaces the misconfiguration in the logs so it can be corrected.
+
 ## Testing Considerations
 
 ### Testnet Testing
@@ -162,6 +172,14 @@ CRAFT resolves the network configuration in this order:
 **Solution**: Verify the Horizon URL:
 - Testnet: `https://horizon-testnet.stellar.org`
 - Mainnet: `https://horizon.stellar.org`
+
+### Error: "Unknown network value"
+
+**Cause**: `STELLAR_NETWORK` (or `NEXT_PUBLIC_STELLAR_NETWORK`) is set to a value other than `mainnet` or `testnet`.
+
+**Solution**: Use one of the supported values. Values are trimmed and case-normalised, so `" mainnet "` and `"MAINNET"` are accepted, but anything else logs a warning and defaults to `testnet`:
+- `testnet`
+- `mainnet`
 
 ### Error: "Invalid asset issuer"
 

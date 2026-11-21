@@ -16,6 +16,7 @@
  * to that endpoint are paused for 1 hour.
  */
 
+import { randomUUID } from 'crypto';
 import { calculateBackoffDelay, sleep } from '../retry/exponential-backoff';
 
 export type WebhookSource = 'stripe' | 'github';
@@ -55,13 +56,30 @@ interface CircuitBreakerState {
 }
 
 const store = new Map<string, DLQEntry>();
+/** Secondary index: stable dedup key → entry id (fixes #926). */
+const dedupIndex = new Map<string, string>();
 const circuitBreakers = new Map<string, CircuitBreakerState>();
+/**
+ * Tracks entry IDs that are currently being reprocessed by any path
+ * (reprocess() or scheduleRetry()). Guards against concurrent double-execution
+ * of the same entry's processor. Fixes #979.
+ */
+const inFlight = new Set<string>();
 
 let _stripeProcessor: ProcessorFn | null = null;
 let _githubProcessor: ProcessorFn | null = null;
 
 function generateId(): string {
-    return `dlq_${Date.now()}_${Math.random().toString(36).slice(2, 9)}`;
+    return `dlq_${Date.now()}_${randomUUID()}`;
+}
+
+/**
+ * Derive a stable dedup key from the logical identity of a webhook delivery.
+ * We use a simple deterministic string rather than a crypto hash so there are
+ * no extra dependencies and the key remains human-readable in logs.
+ */
+function deriveDedupKey(source: WebhookSource, eventType: string, payload: string): string {
+    return `${source}::${eventType}::${payload}`;
 }
 
 function getCircuitBreaker(endpoint: string): CircuitBreakerState {
@@ -112,6 +130,30 @@ export const webhookDLQ = {
         attempts: number,
         endpointUrl?: string,
     ): DLQEntry {
+        // --- Dedup check (fixes #926) ---
+        // Derive a stable key for this logical webhook delivery.
+        const dedupKey = deriveDedupKey(source, eventType, payload);
+        const existingId = dedupIndex.get(dedupKey);
+
+        if (existingId !== undefined) {
+            const existing = store.get(existingId);
+            // Only merge when the existing entry has NOT already succeeded —
+            // a succeeded entry must not be resurrected for reprocessing.
+            if (existing && existing.reprocessStatus !== 'succeeded') {
+                existing.attempts = attempts;
+                existing.failureReason = failureReason;
+                store.set(existingId, existing);
+                console.warn('[DLQ] Duplicate capture merged into existing entry', {
+                    id: existingId,
+                    source,
+                    eventType,
+                    attempts,
+                    failureReason,
+                });
+                return existing;
+            }
+        }
+
         const entry: DLQEntry = {
             id: generateId(),
             source,
@@ -124,6 +166,7 @@ export const webhookDLQ = {
             endpointUrl,
         };
         store.set(entry.id, entry);
+        dedupIndex.set(dedupKey, entry.id);
         console.error('[DLQ] Event captured', {
             id: entry.id,
             source,
@@ -152,16 +195,24 @@ export const webhookDLQ = {
             return { success: false, error: 'Entry already successfully reprocessed' };
         }
 
+        // Guard against concurrent double-reprocessing from any path (#979).
+        if (inFlight.has(id)) {
+            return { success: false, error: 'Entry is already being reprocessed' };
+        }
+
         const processor = entry.source === 'stripe' ? _stripeProcessor : _githubProcessor;
         if (!processor) {
             return { success: false, error: `No processor registered for source: ${entry.source}` };
         }
 
+        inFlight.add(id);
         try {
             await processor(entry);
             entry.reprocessedAt = new Date();
             entry.reprocessStatus = 'succeeded';
             store.set(id, entry);
+            const dedupKey = deriveDedupKey(entry.source, entry.eventType, entry.payload);
+            dedupIndex.delete(dedupKey);
             return { success: true };
         } catch (err: any) {
             entry.reprocessedAt = new Date();
@@ -169,6 +220,8 @@ export const webhookDLQ = {
             entry.failureReason = err?.message ?? 'Reprocessing failed';
             store.set(id, entry);
             return { success: false, error: entry.failureReason };
+        } finally {
+            inFlight.delete(id);
         }
     },
 
@@ -221,12 +274,23 @@ export const webhookDLQ = {
                 return;
             }
 
+            // Guard against concurrent double-reprocessing (#979).
+            // If reprocess() or another scheduleRetry() iteration has this
+            // entry in-flight, skip this attempt to avoid double-execution.
+            if (inFlight.has(id)) {
+                console.warn('[DLQ] scheduleRetry: entry already in-flight, skipping attempt', { id, attempt });
+                continue;
+            }
+
+            inFlight.add(id);
             try {
                 await processor(afterSleep);
                 afterSleep.reprocessedAt = new Date();
                 afterSleep.reprocessStatus = 'succeeded';
                 afterSleep.attempts += 1;
                 store.set(id, afterSleep);
+                const dedupKey = deriveDedupKey(afterSleep.source, afterSleep.eventType, afterSleep.payload);
+                dedupIndex.delete(dedupKey);
                 if (endpoint !== null) recordSuccess(endpoint);
                 console.log('[DLQ] Retry audit', {
                     id,
@@ -251,6 +315,8 @@ export const webhookDLQ = {
                     error: afterSleep.failureReason,
                     timestamp: new Date().toISOString(),
                 });
+            } finally {
+                inFlight.delete(id);
             }
         }
 
@@ -274,6 +340,11 @@ export const webhookDLQ = {
     },
 
     /** Exposed for testing only. */
+    _dedupIndexSize(): number {
+        return dedupIndex.size;
+    },
+
+    /** Exposed for testing only. */
     _getCircuitBreaker(endpoint: string): CircuitBreakerState {
         return getCircuitBreaker(endpoint);
     },
@@ -281,8 +352,18 @@ export const webhookDLQ = {
     /** Exposed for testing only – resets all state. */
     _reset(): void {
         store.clear();
+        dedupIndex.clear();
         circuitBreakers.clear();
+        inFlight.clear();
         _stripeProcessor = null;
         _githubProcessor = null;
+    },
+
+    /**
+     * Read-only view of entry IDs currently being reprocessed.
+     * Used by DLQAutoRecovery.processDue() to skip in-flight entries (#979).
+     */
+    get inFlight(): ReadonlySet<string> {
+        return inFlight;
     },
 };

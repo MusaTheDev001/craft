@@ -7,9 +7,14 @@ import { timingSafeEqual } from 'crypto';
  * Validates that cron routes are only invoked by authorized schedulers
  * using a shared secret. Uses constant-time comparison to prevent
  * timing attacks on the secret.
+ *
+ * The secret is read lazily from `process.env.CRON_SECRET` on every
+ * request, so rotating it takes effect without a process restart.
+ * In production a missing secret fails closed (requests are rejected);
+ * outside production it is allowed but a warning is logged once.
  */
 
-const CRON_SECRET = process.env.CRON_SECRET;
+let hasWarnedMissingSecret = false;
 
 /**
  * Validates cron request signature using constant-time comparison.
@@ -19,7 +24,21 @@ const CRON_SECRET = process.env.CRON_SECRET;
  * Never logs the secret itself.
  */
 function validateCronSignature(req: NextRequest): boolean {
-  if (!CRON_SECRET) {
+  const cronSecret = process.env.CRON_SECRET;
+
+  if (!cronSecret) {
+    if (process.env.NODE_ENV === 'production') {
+      return false;
+    }
+
+    if (!hasWarnedMissingSecret) {
+      hasWarnedMissingSecret = true;
+      console.warn(
+        '[cron-auth] CRON_SECRET is not set; cron routes are unauthenticated. ' +
+          'This is only permitted outside production.'
+      );
+    }
+
     return true;
   }
 
@@ -34,7 +53,7 @@ function validateCronSignature(req: NextRequest): boolean {
   }
 
   try {
-    const expectedBuffer = Buffer.from(CRON_SECRET);
+    const expectedBuffer = Buffer.from(cronSecret);
     const providedBuffer = Buffer.from(token);
 
     if (expectedBuffer.length !== providedBuffer.length) {

@@ -3,7 +3,7 @@ import { withAuth } from '@/lib/api/with-auth';
 import { validateBrandingFile } from '@/lib/customization/validate-branding-file';
 import {
     validateContentLength,
-    DEFAULT_MAX_BRANDING_FILE_SIZE,
+    MAX_BRANDING_FILE_BYTES,
     formatBytes,
 } from '@/lib/api/validate-request-size';
 import {
@@ -17,18 +17,24 @@ import {
  * Enforces path-based namespacing: uploads are stored at {user_id}/{filename}
  * RLS policies in storage bucket prevent cross-user access.
  *
+ * Maximum upload size is 2 MB (MAX_BRANDING_FILE_BYTES), enforced both via
+ * the Content-Length header and the actual file size.
+ *
  * On success returns { url } — the public URL to the uploaded asset.
  * On validation failure returns { error, code } with 422 status.
  * On storage error returns { error } with 500 status.
+ *
+ * NOTE: Storage is not yet wired, so a validated upload currently returns
+ * 501 { error, code: 'STORAGE_NOT_CONFIGURED' } instead of a URL.
+ * Tracking issue: https://github.com/craft/issues/1404
  */
 export const POST = withAuth(async (req: NextRequest, { supabase, user }) => {
-    let formData: FormData;
     try {
         // Validate request size before buffering entire body
         const contentLength = req.headers.get('content-length');
         const sizeValidation = validateContentLength(
             contentLength,
-            DEFAULT_MAX_BRANDING_FILE_SIZE,
+            MAX_BRANDING_FILE_BYTES,
         );
 
         if (!sizeValidation.valid) {
@@ -60,10 +66,10 @@ export const POST = withAuth(async (req: NextRequest, { supabase, user }) => {
         }
 
         // Additional file size check (safety measure)
-        if (file.size > DEFAULT_MAX_BRANDING_FILE_SIZE) {
+        if (file.size > MAX_BRANDING_FILE_BYTES) {
             return NextResponse.json(
                 {
-                    error: `File exceeds maximum size of ${formatBytes(DEFAULT_MAX_BRANDING_FILE_SIZE)}. Received: ${formatBytes(file.size)}.`,
+                    error: `File exceeds maximum size of ${formatBytes(MAX_BRANDING_FILE_BYTES)}. Received: ${formatBytes(file.size)}.`,
                 },
                 { status: 413 },
             );
@@ -109,60 +115,18 @@ export const POST = withAuth(async (req: NextRequest, { supabase, user }) => {
             );
         }
 
-        // TODO: upload buffer to Supabase Storage / S3 and return the real URL
+        // TODO(#1404): upload buffer to Supabase Storage / S3 and return the real URL
+        // https://github.com/craft/issues/1404
         return NextResponse.json(
             {
-                url: null,
-                message: 'File validated successfully. Storage not yet wired.',
+                error: 'Storage not configured',
+                code: 'STORAGE_NOT_CONFIGURED',
             },
-            { status: 200 },
+            { status: 501 },
         );
     } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : 'Upload failed';
         console.error('[branding-upload] unexpected error:', err);
         return NextResponse.json({ error: msg }, { status: 500 });
-    }
-
-    const file = formData.get('file');
-    if (!(file instanceof File)) {
-        return NextResponse.json({ error: 'Missing "file" field' }, { status: 400 });
-    }
-
-    const buffer = new Uint8Array(await file.arrayBuffer());
-    const result = validateBrandingFile(file.name, file.type, file.size, buffer);
-
-    if (!result.valid) {
-        return NextResponse.json({ error: result.error, code: result.code }, { status: 422 });
-    }
-
-    // Enforce path-based namespacing: user_id/filename
-    const storagePath = `${user.id}/${file.name}`;
-
-    try {
-        const { data, error: uploadError } = await supabase.storage
-            .from('branding_assets')
-            .upload(storagePath, buffer, {
-                contentType: file.type,
-                upsert: true,
-            });
-
-        if (uploadError || !data) {
-            return NextResponse.json(
-                { error: uploadError?.message ?? 'Storage upload failed' },
-                { status: 500 },
-            );
-        }
-
-        // Return public URL to the uploaded asset
-        const { data: publicUrlData } = supabase.storage
-            .from('branding_assets')
-            .getPublicUrl(storagePath);
-
-        return NextResponse.json({ url: publicUrlData.publicUrl }, { status: 200 });
-    } catch (err: unknown) {
-        return NextResponse.json(
-            { error: err instanceof Error ? err.message : 'Storage upload failed' },
-            { status: 500 },
-        );
     }
 });

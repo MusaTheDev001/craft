@@ -67,6 +67,27 @@ function makeSupabase(rows: Record<string, unknown> = {}) {
     const updateCalls: UpdatePayload[] = [];
     return {
         _updateCalls: updateCalls,
+        rpc: vi.fn().mockImplementation((fnName: string, args: Record<string, unknown>) => {
+            if (fnName === 'set_provider_connection') {
+                const existing = (rows.provider_connections as Record<string, unknown>) ?? {};
+                const updated = {
+                    ...existing,
+                    [args.p_provider as string]: args.p_value,
+                };
+                rows.provider_connections = updated;
+                updateCalls.push({ provider_connections: updated, updated_at: new Date().toISOString() });
+                return Promise.resolve({ error: null });
+            }
+            if (fnName === 'remove_provider_connection') {
+                const existing = (rows.provider_connections as Record<string, unknown>) ?? {};
+                const updated = { ...existing };
+                delete updated[args.p_provider as string];
+                rows.provider_connections = updated;
+                updateCalls.push({ provider_connections: updated, updated_at: new Date().toISOString() });
+                return Promise.resolve({ error: null });
+            }
+            return Promise.resolve({ error: null });
+        }),
         from: vi.fn().mockReturnValue({
             select: vi.fn().mockReturnThis(),
             update: vi.fn().mockImplementation((payload: UpdatePayload) => {

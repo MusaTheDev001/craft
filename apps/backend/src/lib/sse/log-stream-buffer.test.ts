@@ -75,6 +75,133 @@ describe('LogStreamBuffer', () => {
         });
     });
 
+    describe('input validation (#1414)', () => {
+        it('falls back to the default capacity for NaN', () => {
+            const buf = new LogStreamBuffer({ capacity: Number.NaN });
+            for (let i = 0; i < 100; i++) buf.enqueue('log', line(`l${i}`));
+            expect(buf.size).toBe(100);
+            expect(buf.hasOverflow()).toBe(false);
+        });
+
+        it('truncates fractional capacity', () => {
+            const buf = new LogStreamBuffer({ capacity: 2.5 });
+            buf.enqueue('log', line('a'));
+            buf.enqueue('log', line('b'));
+            buf.enqueue('log', line('c')); // drops seq 1
+            expect(buf.size).toBe(2);
+            expect(buf.consumeDropped()).toBe(1);
+        });
+
+        it('falls back to the default capacity for negative values', () => {
+            const buf = new LogStreamBuffer({ capacity: -5 });
+            for (let i = 0; i < 100; i++) buf.enqueue('log', line(`l${i}`));
+            expect(buf.size).toBe(100);
+            expect(buf.hasOverflow()).toBe(false);
+        });
+
+        it('falls back to 0 for NaN startSeq', () => {
+            const buf = new LogStreamBuffer({ startSeq: Number.NaN });
+            expect(buf.enqueue('log', line('a')).seq).toBe(1);
+        });
+
+        it('truncates fractional startSeq', () => {
+            const buf = new LogStreamBuffer({ startSeq: 42.9 });
+            expect(buf.enqueue('log', line('a')).seq).toBe(43);
+        });
+
+        it('falls back to 0 for negative startSeq', () => {
+            const buf = new LogStreamBuffer({ startSeq: -10 });
+            expect(buf.enqueue('log', line('a')).seq).toBe(1);
+        });
+
+        it('falls back to the default historyLimit for NaN', () => {
+            const buf = new LogStreamBuffer({ capacity: 100, historyLimit: Number.NaN });
+            for (let i = 1; i <= 6; i++) {
+                buf.enqueue('log', line(`l${i}`));
+                buf.drain();
+            }
+            expect(buf.replayFrom(0).map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+        });
+
+        it('truncates fractional historyLimit', () => {
+            const buf = new LogStreamBuffer({ capacity: 100, historyLimit: 2.9 });
+            for (let i = 1; i <= 5; i++) {
+                buf.enqueue('log', line(`l${i}`));
+                buf.drain();
+            }
+            expect(buf.replayFrom(0).map((e) => e.seq)).toEqual([4, 5]);
+            expect(buf.earliestRetainedSeq()).toBe(4);
+        });
+
+        it('falls back to the default historyLimit for negative values', () => {
+            const buf = new LogStreamBuffer({ capacity: 100, historyLimit: -3 });
+            for (let i = 1; i <= 6; i++) {
+                buf.enqueue('log', line(`l${i}`));
+                buf.drain();
+            }
+            expect(buf.replayFrom(0).map((e) => e.seq)).toEqual([1, 2, 3, 4, 5, 6]);
+        });
+
+        it('treats NaN lastSeq as 0 in replayFrom', () => {
+            const buf = new LogStreamBuffer({ capacity: 10 });
+            for (let i = 1; i <= 3; i++) buf.enqueue('log', line(`l${i}`));
+            buf.drain();
+            expect(buf.replayFrom(Number.NaN).map((e) => e.seq)).toEqual([1, 2, 3]);
+        });
+
+        it('treats negative lastSeq as 0 in replayFrom', () => {
+            const buf = new LogStreamBuffer({ capacity: 10 });
+            for (let i = 1; i <= 3; i++) buf.enqueue('log', line(`l${i}`));
+            buf.drain();
+            expect(buf.replayFrom(-5).map((e) => e.seq)).toEqual([1, 2, 3]);
+        });
+
+        it('truncates fractional lastSeq in replayFrom', () => {
+            const buf = new LogStreamBuffer({ capacity: 10 });
+            for (let i = 1; i <= 5; i++) buf.enqueue('log', line(`l${i}`));
+            buf.drain();
+            expect(buf.replayFrom(2.9).map((e) => e.seq)).toEqual([3, 4, 5]);
+        });
+
+        it('treats non-finite lastSeq as 0 in hasSequenceReset', () => {
+            const buf = new LogStreamBuffer({ capacity: 10 });
+            for (let i = 1; i <= 3; i++) buf.enqueue('log', line(`l${i}`));
+            buf.drain();
+            expect(buf.hasSequenceReset(Number.NaN)).toBe(false);
+            expect(buf.hasSequenceReset(Number.POSITIVE_INFINITY)).toBe(false);
+        });
+
+        it('treats negative lastSeq as 0 in hasSequenceReset', () => {
+            const buf = new LogStreamBuffer({ capacity: 10 });
+            for (let i = 1; i <= 3; i++) buf.enqueue('log', line(`l${i}`));
+            buf.drain();
+            expect(buf.hasSequenceReset(-5)).toBe(false);
+        });
+
+        it('sanitizes a client-controlled Last-Event-ID before replay', () => {
+            const buf = new LogStreamBuffer({ capacity: 10 });
+            for (let i = 1; i <= 5; i++) buf.enqueue('log', line(`l${i}`));
+            buf.drain();
+
+            // Simulate parsing an untrusted Last-Event-ID header.
+            const parseLastEventId = (raw: string | null): number => {
+                const parsed = Number.parseInt(raw ?? '', 10);
+                return Number.isFinite(parsed) ? parsed : 0;
+            };
+
+            const nanId = parseLastEventId('not-a-number');
+            expect(buf.hasSequenceReset(nanId)).toBe(false);
+            expect(buf.replayFrom(nanId).map((e) => e.seq)).toEqual([1, 2, 3, 4, 5]);
+
+            const negativeId = parseLastEventId('-5');
+            expect(buf.hasSequenceReset(negativeId)).toBe(false);
+            expect(buf.replayFrom(negativeId).map((e) => e.seq)).toEqual([1, 2, 3, 4, 5]);
+
+            const fractionalId = parseLastEventId('2.9');
+            expect(buf.replayFrom(fractionalId).map((e) => e.seq)).toEqual([3, 4, 5]);
+        });
+    });
+
     describe('drain', () => {
         it('removes and returns all pending entries', () => {
             const buf = new LogStreamBuffer();

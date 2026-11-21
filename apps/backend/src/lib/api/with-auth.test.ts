@@ -60,35 +60,68 @@ describe('withDeploymentAuth', () => {
         mockGetUser.mockResolvedValue({ data: { user: fakeUser }, error: null });
     });
 
-    it('returns 403 when deployment not found', async () => {
-        mockFrom.mockReturnValue({
-            select: () => ({ eq: () => ({ single: () => Promise.resolve({ data: null }) }) }),
-        });
-
-        const handler = withDeploymentAuth(async () => NextResponse.json({ ok: true }));
-        const res = await handler(makeRequest(), { params: { id: 'dep-1' } });
-
-        expect(res.status).toBe(403);
-        expect(await res.json()).toEqual({ error: 'Forbidden' });
-    });
-
-    it('returns 403 when deployment belongs to a different user', async () => {
+    it('returns 404 when deployment not found', async () => {
         mockFrom.mockReturnValue({
             select: () => ({
-                eq: () => ({ single: () => Promise.resolve({ data: { user_id: 'other-user' } }) }),
+                eq: () => ({
+                    single: () =>
+                        Promise.resolve({
+                            data: null,
+                            error: { code: 'PGRST116', message: 'no rows returned' },
+                        }),
+                }),
             }),
         });
 
         const handler = withDeploymentAuth(async () => NextResponse.json({ ok: true }));
         const res = await handler(makeRequest(), { params: { id: 'dep-1' } });
 
-        expect(res.status).toBe(403);
+        expect(res.status).toBe(404);
+        expect(await res.json()).toEqual({ error: 'Not Found' });
+    });
+
+    it('returns 404 when deployment belongs to a different user', async () => {
+        mockFrom.mockReturnValue({
+            select: () => ({
+                eq: () => ({
+                    single: () => Promise.resolve({ data: { user_id: 'other-user' }, error: null }),
+                }),
+            }),
+        });
+
+        const handler = withDeploymentAuth(async () => NextResponse.json({ ok: true }));
+        const res = await handler(makeRequest(), { params: { id: 'dep-1' } });
+
+        expect(res.status).toBe(404);
+        expect(await res.json()).toEqual({ error: 'Not Found' });
+    });
+
+    it('returns 500 when the Supabase query fails with a non-"no rows" error', async () => {
+        mockFrom.mockReturnValue({
+            select: () => ({
+                eq: () => ({
+                    single: () =>
+                        Promise.resolve({
+                            data: null,
+                            error: { code: 'XX000', message: 'connection failure' },
+                        }),
+                }),
+            }),
+        });
+
+        const handler = withDeploymentAuth(async () => NextResponse.json({ ok: true }));
+        const res = await handler(makeRequest(), { params: { id: 'dep-1' } });
+
+        expect(res.status).toBe(500);
+        expect(await res.json()).toEqual({ error: 'Internal Server Error' });
     });
 
     it('calls the handler when user owns the deployment', async () => {
         mockFrom.mockReturnValue({
             select: () => ({
-                eq: () => ({ single: () => Promise.resolve({ data: { user_id: fakeUser.id } }) }),
+                eq: () => ({
+                    single: () => Promise.resolve({ data: { user_id: fakeUser.id }, error: null }),
+                }),
             }),
         });
 

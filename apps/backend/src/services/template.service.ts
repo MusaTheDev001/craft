@@ -5,7 +5,7 @@
  *
  * Full-text search (searchTemplates / listTemplates with `q` filter):
  *   - Backed by a Postgres tsvector column on name (weight A), tags (weight B),
- *     and description (weight C) — see migration 016_template_fulltext_search.sql.
+ *     and description (weight C) — see migration 030_template_fulltext_search.sql.
  *   - Results are ranked by ts_rank (most relevant first).
  *   - Supports: keyword search, phrase search ("liquidity pool"),
  *     prefix search (decentral:*), and category filter combined with text search.
@@ -26,6 +26,26 @@ import type {
 
 export interface TemplateSearchResult extends Template {
     relevanceScore: number;
+}
+
+// ── PostgREST filter escaping ─────────────────────────────────────────────────
+
+/**
+ * Escape a user-supplied search term before interpolating it into a PostgREST
+ * `or()` filter expression (e.g. `name.ilike.%<term>%,description.ilike.%<term>%`).
+ *
+ * PostgREST treats `,`, `(`, `)` and `.` as structural characters inside filter
+ * expressions, so an unescaped term like `a,id.eq.1` could inject an extra
+ * filter clause. Wildcard characters (`%`, `_`, `*`) are also stripped so the
+ * term cannot broaden the match beyond a literal substring search.
+ *
+ * Rule: remove every reserved/wildcard character listed below. The result is
+ * safe to embed inside a `%...%` ilike pattern.
+ */
+export function escapePostgrestSearchTerm(term: string): string {
+    // Reserved PostgREST filter characters: , ( ) .
+    // Wildcard characters: % _ *
+    return term.replace(/[,().%_*]/g, '');
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -102,10 +122,13 @@ export class TemplateService {
             query = query.eq('blockchain_type', filters.blockchainType);
         }
 
-        // Apply legacy ilike search filter
+        // Apply legacy ilike search filter.
+        // The user term is escaped via escapePostgrestSearchTerm() to prevent
+        // filter-clause injection through reserved PostgREST characters.
         if (filters?.search) {
+            const escaped = escapePostgrestSearchTerm(filters.search);
             query = query.or(
-                `name.ilike.%${filters.search}%,description.ilike.%${filters.search}%`
+                `name.ilike.%${escaped}%,description.ilike.%${escaped}%`
             );
         }
 

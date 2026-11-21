@@ -4,6 +4,7 @@ import {
   xdrTypeToTypeScript,
   parseContractAbi,
   generateBinding,
+  toValidTsIdentifier,
 } from './abi-binding-generator';
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,27 @@ function buildStructUdt(
   );
 }
 
+function buildUnionUdt(
+  name: string,
+  cases: { doc?: string; name: string; type?: xdr.ScSpecTypeDef }[],
+): xdr.ScSpecEntry {
+  return xdr.ScSpecEntry.scSpecEntryUdtUnionV0(
+    new xdr.ScSpecUdtUnionV0({
+      doc: '',
+      lib: '',
+      name,
+      cases: cases.map(
+        (c) =>
+          new xdr.ScSpecUdtUnionCaseV0({
+            doc: c.doc ?? '',
+            name: c.name,
+            type: c.type,
+          }),
+      ),
+    }),
+  );
+}
+
 function buildCompoundType(
   arm: string,
   inner: xdr.ScSpecTypeDef,
@@ -84,6 +106,48 @@ function buildCompoundType(
     default:
       return inner;
   }
+}
+
+function buildEnumUdt(
+  name: string,
+  cases: { doc?: string; name: string; value: number }[],
+): xdr.ScSpecEntry {
+  return xdr.ScSpecEntry.scSpecEntryUdtEnumV0(
+    new xdr.ScSpecUdtEnumV0({
+      doc: '',
+      lib: '',
+      name,
+      cases: cases.map(
+        (c) =>
+          new xdr.ScSpecUdtEnumCaseV0({
+            doc: c.doc ?? '',
+            name: c.name,
+            discriminant: new xdr.ScVal.scvU32(new xdr.Uint32(c.value)),
+          }),
+      ),
+    }),
+  );
+}
+
+function buildErrorEnumUdt(
+  name: string,
+  cases: { doc?: string; name: string; value: number }[],
+): xdr.ScSpecEntry {
+  return xdr.ScSpecEntry.scSpecEntryUdtErrorEnumV0(
+    new xdr.ScSpecUdtErrorEnumV0({
+      doc: '',
+      lib: '',
+      name,
+      cases: cases.map(
+        (c) =>
+          new xdr.ScSpecUdtErrorEnumCaseV0({
+            doc: c.doc ?? '',
+            name: c.name,
+            discriminant: new xdr.ScVal.scvU32(new xdr.Uint32(c.value)),
+          }),
+      ),
+    }),
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -453,6 +517,32 @@ describe('generateBinding', () => {
     expect(source).toContain('invoke: InvokeCallback');
   });
 
+  it('generates discriminated union types for union UDTs', () => {
+    const entries = [
+      buildUnionUdt('Action', [
+        { name: 'Transfer', type: xdr.ScSpecTypeDef.scSpecTypeAddress() },
+        { name: 'Approve', type: xdr.ScSpecTypeDef.scSpecTypeI128() },
+        { name: 'Burn' },
+      ]),
+      ...buildSpecEntries({
+        functions: [
+          {
+            name: 'execute',
+            inputs: [
+              { name: 'action', type: xdr.ScSpecTypeDef.scSpecTypeUdt(new xdr.ScSpecTypeUdt({ name: 'Action' })) },
+            ],
+            outputs: [xdr.ScSpecTypeDef.scSpecTypeBool()],
+          },
+        ],
+      }),
+    ];
+
+    const source = generateBinding(entries);
+    expect(source).toContain("export interface Action<T = undefined>");
+    expect(source).toContain("tag: 'Transfer' | 'Approve' | 'Burn';");
+    expect(source).toContain('values?: T;');
+  });
+
   it('compiles to valid TypeScript with all primitive types', () => {
     const entries = buildSpecEntries({
       functions: [
@@ -483,4 +573,259 @@ describe('generateBinding', () => {
     expect(source).toContain('async all_types(');
     expect(source).toContain('Promise<bigint>');
   });
+
+  it('preserves non-sequential enum discriminant values', () => {
+    const entries = [
+      buildEnumUdt('Status', [
+        { name: 'Idle', value: 0 },
+        { name: 'Running', value: 2 },
+        { name: 'Done', value: 5 },
+      ]),
+      ...buildSpecEntries({
+        functions: [
+          {
+            name: 'get_status',
+            inputs: [],
+            outputs: [xdr.ScSpecTypeDef.scSpecTypeUdt(new xdr.ScSpecTypeUdt({ name: 'Status' }))],
+          },
+        ],
+      }),
+    ];
+
+    const source = generateBinding(entries);
+    expect(source).toContain('export enum Status');
+    expect(source).toContain('Idle = 0');
+    expect(source).toContain('Running = 2');
+    expect(source).toContain('Done = 5');
+  });
+
+  it('preserves non-sequential error enum discriminant values', () => {
+    const entries = [
+      buildErrorEnumUdt('ContractError', [
+        { name: 'InvalidAmount', value: 1 },
+        { name: 'InsufficientBalance', value: 3 },
+        { name: 'Unauthorized', value: 7 },
+      ]),
+      ...buildSpecEntries({
+        functions: [
+          {
+            name: 'transfer',
+            inputs: [
+              { name: 'to', type: xdr.ScSpecTypeDef.scSpecTypeAddress() },
+              { name: 'amount', type: xdr.ScSpecTypeDef.scSpecTypeI128() },
+            ],
+            outputs: [xdr.ScSpecTypeDef.scSpecTypeBool()],
+          },
+        ],
+      }),
+    ];
+
+    const source = generateBinding(entries);
+    expect(source).toContain('export enum ContractError');
+    expect(source).toContain('InvalidAmount = 1');
+    expect(source).toContain('InsufficientBalance = 3');
+    expect(source).toContain('Unauthorized = 7');
+  });
+
+  it('does not emit doc comment block for UDT without documentation (#1128)', () => {
+    // Verify struct UDT with empty doc string doesn't produce stray /** */ block
+    const entries = [
+      buildStructUdt('TransactionData', [
+        { name: 'id', type: xdr.ScSpecTypeDef.scSpecTypeString() },
+        { name: 'amount', type: xdr.ScSpecTypeDef.scSpecTypeI128() },
+      ]),
+      ...buildSpecEntries({
+        functions: [
+          {
+            name: 'process',
+            inputs: [
+              { name: 'tx', type: xdr.ScSpecTypeDef.scSpecTypeUdt(new xdr.ScSpecTypeUdt({ name: 'TransactionData' })) },
+            ],
+            outputs: [xdr.ScSpecTypeDef.scSpecTypeBool()],
+          },
+        ],
+      }),
+    ];
+
+    const source = generateBinding(entries);
+    const lines = source.split('\n');
+    const structLineIdx = lines.findIndex(line => line.includes('export interface TransactionData'));
+    expect(structLineIdx).toBeGreaterThan(0);
+    const prevLine = lines[structLineIdx - 1];
+    // Ensure no empty JSDoc comment before the interface
+    expect(prevLine?.trim()).not.toBe('/**');
+    expect(prevLine?.trim()).not.toBe('*/');
+  });
 });
+
+// ---------------------------------------------------------------------------
+// Regression #1105 – sanitized-identifier collision detection
+// ---------------------------------------------------------------------------
+
+describe('generateBinding – identifier collision detection (regression #1105)', () => {
+  it('throws a descriptive error when two function names sanitize to the same identifier', () => {
+    // "transfer-from" and "transfer_from" both become "transfer_from" after safeIdent
+    const entries = buildSpecEntries({
+      functions: [
+        {
+          name: 'transfer-from',
+          inputs: [{ name: 'amount', type: xdr.ScSpecTypeDef.scSpecTypeU64() }],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeBool()],
+        },
+        {
+          name: 'transfer_from',
+          inputs: [{ name: 'amount', type: xdr.ScSpecTypeDef.scSpecTypeU64() }],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeBool()],
+        },
+      ],
+    });
+
+    expect(() => generateBinding(entries)).toThrow(/collision/i);
+    expect(() => generateBinding(entries)).toThrow(/transfer.from/);
+  });
+
+  it('includes both colliding raw names in the error message', () => {
+    const entries = buildSpecEntries({
+      functions: [
+        {
+          name: 'my.method',
+          inputs: [],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeVoid()],
+        },
+        {
+          name: 'my_method',
+          inputs: [],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeVoid()],
+        },
+      ],
+    });
+
+    let err: Error | undefined;
+    try {
+      generateBinding(entries);
+    } catch (e) {
+      err = e as Error;
+    }
+    expect(err).toBeDefined();
+    expect(err!.message).toContain('my.method');
+    expect(err!.message).toContain('my_method');
+  });
+
+  it('does NOT throw when all function names produce distinct safe identifiers', () => {
+    const entries = buildSpecEntries({
+      functions: [
+        {
+          name: 'transfer',
+          inputs: [],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeVoid()],
+        },
+        {
+          name: 'approve',
+          inputs: [],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeVoid()],
+        },
+      ],
+    });
+
+    expect(() => generateBinding(entries)).not.toThrow();
+  });
+
+  it('throws when two UDT names sanitize to the same identifier', () => {
+    // "My-Type" and "My_Type" both become "My_Type"
+    const myType1 = buildStructUdt('My-Type', [
+      { name: 'value', type: xdr.ScSpecTypeDef.scSpecTypeU32() },
+    ]);
+    const myType2 = buildStructUdt('My_Type', [
+      { name: 'value', type: xdr.ScSpecTypeDef.scSpecTypeU32() },
+    ]);
+    const fnEntries = buildSpecEntries({
+      functions: [
+        { name: 'noop', inputs: [], outputs: [xdr.ScSpecTypeDef.scSpecTypeVoid()] },
+      ],
+    });
+
+    expect(() => generateBinding([myType1, myType2, ...fnEntries])).toThrow(/collision/i);
+  });
+});
+// ---------------------------------------------------------------------------
+// End regression #1105
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Issue #1287: Invalid identifier sanitization for leading digits and reserved words
+// ---------------------------------------------------------------------------
+describe('Issue #1287: toValidTsIdentifier and reserved-word / leading-digit sanitization', () => {
+  it('prefixes leading digits with underscore', () => {
+    expect(toValidTsIdentifier('1swap')).toBe('_1swap');
+    expect(toValidTsIdentifier('0balance')).toBe('_0balance');
+    expect(toValidTsIdentifier('99tokens')).toBe('_99tokens');
+  });
+
+  it('suffixes TypeScript reserved words with underscore', () => {
+    expect(toValidTsIdentifier('class')).toBe('class_');
+    expect(toValidTsIdentifier('interface')).toBe('interface_');
+    expect(toValidTsIdentifier('function')).toBe('function_');
+    expect(toValidTsIdentifier('default')).toBe('default_');
+    expect(toValidTsIdentifier('type')).toBe('type_');
+  });
+
+  it('preserves valid TypeScript identifiers', () => {
+    expect(toValidTsIdentifier('swap_tokens')).toBe('swap_tokens');
+    expect(toValidTsIdentifier('getBalance')).toBe('getBalance');
+    expect(toValidTsIdentifier('_existing_prefix')).toBe('_existing_prefix');
+  });
+
+  it('emits valid binding code for functions named with leading digits or reserved words', () => {
+    const entries = buildSpecEntries({
+      functions: [
+        {
+          name: '1swap',
+          inputs: [
+            {
+              name: 'class',
+              type: xdr.ScSpecTypeDef.scSpecTypeU32(),
+            },
+          ],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeU32()],
+        },
+        {
+          name: 'class',
+          inputs: [],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeVoid()],
+        },
+      ],
+    });
+
+    const code = generateBinding(entries, 'TokenContract');
+
+    // Method and interface names should be sanitized
+    expect(code).toContain('export interface _1swapArgs {');
+    expect(code).toContain('class_: number;');
+    expect(code).toContain('async _1swap(');
+    expect(code).toContain('async class_(');
+    // ContractSpec calls should still invoke original contract method name strings
+    expect(code).toContain("spec.funcArgsToScVals('1swap'");
+    expect(code).toContain("invoke('1swap', scArgs)");
+    expect(code).toContain("invoke('class', scArgs)");
+  });
+
+  it('routes leading-digit name collisions through existing collision detection', () => {
+    const entries = buildSpecEntries({
+      functions: [
+        {
+          name: '1swap',
+          inputs: [],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeVoid()],
+        },
+        {
+          name: '_1swap',
+          inputs: [],
+          outputs: [xdr.ScSpecTypeDef.scSpecTypeVoid()],
+        },
+      ],
+    });
+
+    expect(() => generateBinding(entries)).toThrow(/collision/i);
+  });
+});
+

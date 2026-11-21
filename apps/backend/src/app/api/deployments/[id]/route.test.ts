@@ -25,7 +25,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { NextRequest } from 'next/server';
-import { DELETE } from './route';
+import { DELETE, parseGithubRepoUrl } from './route';
 import { DeploymentService } from '@/services/deployment.service';
 import { RepositoryCleanupService } from '@/services/github/repository-cleanup.service';
 
@@ -317,6 +317,48 @@ describe('GET /api/deployments/[id]', () => {
 });
 
 // ---------------------------------------------------------------------------
+// parseGithubRepoUrl tests — Issue #1407
+// ---------------------------------------------------------------------------
+
+describe('parseGithubRepoUrl', () => {
+    it('parses a plain GitHub repository URL', () => {
+        expect(parseGithubRepoUrl('https://github.com/user/repo')).toEqual({
+            owner: 'user',
+            repo: 'repo',
+        });
+    });
+
+    it('strips a .git suffix from the repository name', () => {
+        expect(parseGithubRepoUrl('https://github.com/user/repo.git')).toEqual({
+            owner: 'user',
+            repo: 'repo',
+        });
+    });
+
+    it('ignores trailing slash and extra path segments', () => {
+        expect(parseGithubRepoUrl('https://github.com/user/repo/')).toEqual({
+            owner: 'user',
+            repo: 'repo',
+        });
+        expect(parseGithubRepoUrl('https://github.com/user/repo/tree/main')).toEqual({
+            owner: 'user',
+            repo: 'repo',
+        });
+        expect(parseGithubRepoUrl('https://github.com/user/repo.git/tree/main')).toEqual({
+            owner: 'user',
+            repo: 'repo',
+        });
+    });
+
+    it('returns null for URLs that are not GitHub repository URLs', () => {
+        expect(parseGithubRepoUrl(null)).toBeNull();
+        expect(parseGithubRepoUrl('')).toBeNull();
+        expect(parseGithubRepoUrl('https://gitlab.com/user/repo')).toBeNull();
+        expect(parseGithubRepoUrl('https://github.com/user')).toBeNull();
+    });
+});
+
+// ---------------------------------------------------------------------------
 // DELETE tests — Issue #99: deployment deletion flow
 // ---------------------------------------------------------------------------
 
@@ -505,6 +547,25 @@ describe('DELETE /api/deployments/[id]', () => {
 
         expect(res.status).toBe(500);
         expect((await res.json()).error).toBe('Failed to delete deployment');
+    });
+
+    // 9b. Soft-delete failure → 500 and external cleanup is NOT attempted (#1406)
+    it('does not call external cleanup when the soft-delete update fails', async () => {
+        mockFrom
+            .mockReturnValueOnce(makeOwnershipQuery(fakeUser.id, baseDeployment))
+            .mockReturnValueOnce({
+                update: vi.fn(() => ({
+                    eq: vi.fn().mockResolvedValue({ error: { message: 'update failed' } }),
+                })),
+            });
+        const { DELETE } = await import('./route');
+
+        const res = await DELETE(makeDeleteRequest(), { params });
+
+        expect(res.status).toBe(500);
+        expect((await res.json()).error).toBe('Failed to delete deployment');
+        expect(mockDeleteRepository).not.toHaveBeenCalled();
+        expect(mockDeleteProject).not.toHaveBeenCalled();
     });
 
     // 10. No external calls when both provider IDs are null

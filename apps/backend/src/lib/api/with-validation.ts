@@ -9,10 +9,27 @@
  * On failure returns HTTP 400 with field-level errors:
  *   { error: 'Validation failed', details: { field: ['message'] } }
  *
- * Compose with withAuth / withRateLimit:
- *   export const POST = withRateLimit('route', config)(
- *     withValidation(schema)(handler)
- *   );
+ * Compose with withAuth / withRateLimit / withRole / withUsageTracking. Put
+ * validation AFTER auth/role checks but BEFORE usage-tracking — see
+ * CONTRIBUTING.md's "Middleware Composition Order" section for why:
+ *
+ * @example
+ * ```typescript
+ * export const POST = withRateLimit('deployments:create', DEPLOY_RATE_LIMIT)(
+ *   withAuth(async (req, ctx) => {
+ *     return withValidation(createDeploymentSchema)(async (req, innerCtx) => {
+ *       const trackedHandler = await withUsageTracking(
+ *         async (req, trackedCtx) => {
+ *           const deployment = await createDeployment(ctx.user.id, req.validatedBody);
+ *           return NextResponse.json(deployment, { status: 201 });
+ *         },
+ *         'deployment_create'
+ *       );
+ *       return trackedHandler(req, innerCtx);
+ *     })(req, { params: ctx.params });
+ *   })
+ * );
+ * ```
  */
 
 import { NextRequest, NextResponse } from 'next/server';
@@ -41,6 +58,20 @@ function formatErrors(err: ZodError): Record<string, string[]> {
  * Validates the JSON request body against the given Zod schema.
  * Returns 400 with field-level errors if validation fails.
  * Attaches `req.validatedBody` for the inner handler.
+ *
+ * @example
+ * ```typescript
+ * const createDeploymentSchema = z.object({
+ *   projectId: z.string().uuid(),
+ *   branch: z.string().min(1),
+ * });
+ *
+ * export const POST = withValidation(createDeploymentSchema)(async (req) => {
+ *   const { projectId, branch } = req.validatedBody; // typed, already valid
+ *   const deployment = await createDeployment(projectId, branch);
+ *   return NextResponse.json(deployment, { status: 201 });
+ * });
+ * ```
  */
 export function withValidation<TBody, TParams = {}>(schema: ZodSchema<TBody>) {
     return (handler: RouteHandler<TBody, TParams>) =>
@@ -69,6 +100,20 @@ export function withValidation<TBody, TParams = {}>(schema: ZodSchema<TBody>) {
  * Validates URL search params against the given Zod schema.
  * Returns 400 with field-level errors if validation fails.
  * Attaches `req.validatedQuery` for the inner handler.
+ *
+ * @example
+ * ```typescript
+ * const listDeploymentsQuerySchema = z.object({
+ *   status: z.enum(['pending', 'live', 'failed']).optional(),
+ *   limit: z.coerce.number().int().positive().max(100).default(20),
+ * });
+ *
+ * export const GET = withQueryValidation(listDeploymentsQuerySchema)(async (req) => {
+ *   const { status, limit } = req.validatedQuery; // typed, already valid
+ *   const deployments = await listDeployments({ status, limit });
+ *   return NextResponse.json(deployments);
+ * });
+ * ```
  */
 export function withQueryValidation<TQuery, TParams = {}>(schema: ZodSchema<TQuery>) {
     return (handler: QueryHandler<TQuery, TParams>) =>
@@ -90,6 +135,17 @@ export function withQueryValidation<TQuery, TParams = {}>(schema: ZodSchema<TQue
 /**
  * Validates route params against the given Zod schema.
  * Returns 400 with field-level errors if validation fails.
+ *
+ * @example
+ * ```typescript
+ * const paramsSchema = z.object({ deploymentId: z.string().uuid() });
+ *
+ * export const DELETE = withParamsValidation(paramsSchema)(async (req, ctx) => {
+ *   const { deploymentId } = ctx.params; // typed, already valid
+ *   await deleteDeployment(deploymentId);
+ *   return NextResponse.json({ deleted: true });
+ * });
+ * ```
  */
 export function withParamsValidation<TParams extends Record<string, unknown>>(
     schema: ZodSchema<TParams>,

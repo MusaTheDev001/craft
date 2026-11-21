@@ -28,6 +28,7 @@ import {
     SnapshotSizeLimitError,
     SnapshotNotFoundError,
     SnapshotStorageError,
+    SnapshotOriginMismatchError,
     type SnapshotRpcClient,
     type SnapshotStorage,
     type SnapshotDb,
@@ -188,6 +189,65 @@ describe('ContractStateSnapshotService.snapshot()', () => {
 
         await expect(svc.snapshot(CONTRACT_ID, LEDGER_SEQ)).rejects.toThrow(/constraint violation/);
     });
+
+    it('includes additional keys in getLedgerEntries call', async () => {
+        const rpc = makeRpc([
+            makeXdrEntry('AAAAA==', 'BBBBB=='),
+            makeXdrEntry('KEY01==', 'VAL01=='),
+            makeXdrEntry('KEY02==', 'VAL02=='),
+        ]);
+        const svc = new ContractStateSnapshotService(rpc, makeStorage(), makeDb());
+
+        // Create mock additional keys
+        const additionalKey1 = { toXDR: () => 'KEY01==' } as any;
+        const additionalKey2 = { toXDR: () => 'KEY02==' } as any;
+
+        await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, [additionalKey1, additionalKey2]);
+
+        // Verify getLedgerEntries was called with 3 keys (instance + 2 additional)
+        expect(rpc.getLedgerEntries).toHaveBeenCalledOnce();
+        const callArgs = (rpc.getLedgerEntries as ReturnType<typeof vi.fn>).mock.calls[0];
+        expect(callArgs).toHaveLength(3);
+    });
+
+    it('captures multiple keys in snapshot round-trip', async () => {
+        const multiEntries: LedgerEntryRecord[] = [
+            { keyXdr: 'KEY01==', valueXdr: 'VAL01==', liveUntilLedgerSeq: LEDGER_SEQ + 100 },
+            { keyXdr: 'KEY02==', valueXdr: 'VAL02==', liveUntilLedgerSeq: LEDGER_SEQ + 200 },
+            { keyXdr: 'KEY03==', valueXdr: 'VAL03==', liveUntilLedgerSeq: LEDGER_SEQ + 300 },
+        ];
+        const rpcEntries = multiEntries.map((e) => makeXdrEntry(e.keyXdr, e.valueXdr, e.liveUntilLedgerSeq));
+        const rpc = makeRpc(rpcEntries);
+
+        let capturedBlob: Buffer | null = null;
+        const storage = makeStorage({
+            upload: vi.fn().mockImplementation(async (_path: string, data: Buffer) => {
+                capturedBlob = data;
+                return { error: null };
+            }),
+            download: vi.fn().mockImplementation(async () => {
+                return { data: new Blob([capturedBlob!]), error: null };
+            }),
+        });
+
+        const svc = new ContractStateSnapshotService(rpc, storage, makeDb());
+
+        // Snapshot with additional keys
+        const additionalKeys = [{} as any, {} as any];
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, additionalKeys);
+
+        expect(snap.entryCount).toBe(3);
+        expect(capturedBlob).not.toBeNull();
+
+        // Restore and verify all entries are preserved
+        const restored = await svc.restore(snap.id);
+        expect(restored.entries).toHaveLength(3);
+        for (let i = 0; i < multiEntries.length; i++) {
+            expect(restored.entries[i].keyXdr).toBe(multiEntries[i].keyXdr);
+            expect(restored.entries[i].valueXdr).toBe(multiEntries[i].valueXdr);
+            expect(restored.entries[i].liveUntilLedgerSeq).toBe(multiEntries[i].liveUntilLedgerSeq);
+        }
+    });
 });
 
 // ── restore() tests ────────────────────────────────────────────────────────────
@@ -291,5 +351,287 @@ describe('snapshot → restore round-trip', () => {
             expect(restored.entries[i].valueXdr).toBe(FAKE_ENTRIES[i].valueXdr);
             expect(restored.entries[i].liveUntilLedgerSeq).toBe(FAKE_ENTRIES[i].liveUntilLedgerSeq);
         }
+    });
+});
+
+// ── Additional persistent storage keys (Issue #968) ────────────────────────────
+
+describe('ContractStateSnapshotService.snapshot() with additionalKeys', () => {
+    it('includes instance key and additional persistent-data keys in a single getLedgerEntries call', async () => {
+        const additionalKey1 = {
+            toXDR: (_enc: string) => 'ADDITIONAL_KEY_1_XDR',
+        };
+        const additionalKey2 = {
+            toXDR: (_enc: string) => 'ADDITIONAL_KEY_2_XDR',
+        };
+        const additionalKeys = [additionalKey1, additionalKey2] as any[];
+
+        const rpc = makeRpc([
+            makeXdrEntry('INSTANCE_KEY', 'INSTANCE_VALUE', LEDGER_SEQ + 500),
+            makeXdrEntry('ADDITIONAL_KEY_1', 'ADDITIONAL_VALUE_1', LEDGER_SEQ + 600),
+            makeXdrEntry('ADDITIONAL_KEY_2', 'ADDITIONAL_VALUE_2', LEDGER_SEQ + 700),
+        ]);
+        const svc = new ContractStateSnapshotService(rpc, makeStorage(), makeDb());
+
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, additionalKeys);
+
+        // Should have called getLedgerEntries with exactly 3 keys (1 instance + 2 additional)
+        expect(rpc.getLedgerEntries).toHaveBeenCalledOnce();
+        expect(snap.entryCount).toBe(3);
+    });
+
+    it('snapshots all keys together (instance plus additional) in round-trip', async () => {
+        const additionalKey = {
+            toXDR: (_enc: string) => 'BALANCE_KEY_XDR',
+        };
+        const additionalKeys = [additionalKey] as any[];
+
+        const fakeAdditionalEntry: LedgerEntryRecord = {
+            keyXdr: 'BALANCE_KEY',
+            valueXdr: 'BALANCE_VALUE_100',
+            liveUntilLedgerSeq: LEDGER_SEQ + 800,
+        };
+
+        const rpcEntries = [
+            ...FAKE_ENTRIES.map((e) => makeXdrEntry(e.keyXdr, e.valueXdr, e.liveUntilLedgerSeq)),
+            makeXdrEntry(fakeAdditionalEntry.keyXdr, fakeAdditionalEntry.valueXdr, fakeAdditionalEntry.liveUntilLedgerSeq),
+        ];
+
+        let capturedBlob: Buffer | null = null;
+        const rpc = makeRpc(rpcEntries);
+        const storage = makeStorage({
+            upload: vi.fn().mockImplementation(async (_path: string, data: Buffer) => {
+                capturedBlob = data;
+                return { error: null };
+            }),
+            download: vi.fn().mockImplementation(async () => {
+                return { data: new Blob([capturedBlob!]), error: null };
+            }),
+        });
+
+        const svc = new ContractStateSnapshotService(rpc, storage, makeDb());
+
+        // Snapshot with additional keys
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, additionalKeys);
+        expect(snap.entryCount).toBe(3); // 2 original + 1 additional
+
+        // Restore and verify all entries are present
+        const restored = await svc.restore(snap.id);
+        expect(restored.entries).toHaveLength(3);
+        expect(restored.entries.map((e) => e.keyXdr)).toContain('BALANCE_KEY');
+    });
+
+    it('works when no additionalKeys are supplied', async () => {
+        const rpc = makeRpc([makeXdrEntry('INSTANCE', 'VALUE')]);
+        const svc = new ContractStateSnapshotService(rpc, makeStorage(), makeDb());
+
+        // Call without additionalKeys (undefined)
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ);
+
+        expect(snap.entryCount).toBe(1);
+        expect(rpc.getLedgerEntries).toHaveBeenCalledOnce();
+    });
+
+    it('works when additionalKeys is an empty array', async () => {
+        const rpc = makeRpc([makeXdrEntry('INSTANCE', 'VALUE')]);
+        const svc = new ContractStateSnapshotService(rpc, makeStorage(), makeDb());
+
+        // Call with empty additionalKeys
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ, []);
+
+        expect(snap.entryCount).toBe(1);
+        expect(rpc.getLedgerEntries).toHaveBeenCalledOnce();
+    });
+});
+
+// ── #1110 – corrupted blob regression tests ────────────────────────────────────
+
+describe('ContractStateSnapshotService.restore() – corrupted blob (#1110)', () => {
+    const STORAGE_PATH = `${CONTRACT_ID}/${LEDGER_SEQ}.json.zlib`;
+
+    it('throws SnapshotStorageError (not a bare SyntaxError) when the blob is invalid JSON after decompression', async () => {
+        // Build a valid zlib-compressed blob whose decompressed content is NOT valid JSON.
+        const truncatedJson = '{ "contractId": "C...", "ledgerSequence": 123, "entries": ['; // unclosed
+        const corruptedCompressed = await promisify(zlib.deflate)(Buffer.from(truncatedJson, 'utf8'));
+
+        const storage = makeStorage({
+            download: vi.fn().mockResolvedValue({ data: new Blob([corruptedCompressed]), error: null }),
+        });
+        const svc = new ContractStateSnapshotService(makeRpc(), storage, makeDb());
+
+        const error = await svc.restore(SNAPSHOT_ID).catch((e) => e);
+
+        // Must be a typed SnapshotStorageError, not a raw SyntaxError.
+        expect(error).toBeInstanceOf(SnapshotStorageError);
+        expect(error.name).toBe('SnapshotStorageError');
+    });
+
+    it('error message identifies the snapshotId', async () => {
+        const badJson = 'NOT_JSON_AT_ALL';
+        const corruptedCompressed = await promisify(zlib.deflate)(Buffer.from(badJson, 'utf8'));
+
+        const storage = makeStorage({
+            download: vi.fn().mockResolvedValue({ data: new Blob([corruptedCompressed]), error: null }),
+        });
+        const svc = new ContractStateSnapshotService(makeRpc(), storage, makeDb());
+
+        const error = await svc.restore(SNAPSHOT_ID).catch((e) => e);
+
+        expect(error.message).toContain(SNAPSHOT_ID);
+    });
+
+    it('error message identifies the storage_path', async () => {
+        const badJson = '{}bad';
+        const corruptedCompressed = await promisify(zlib.deflate)(Buffer.from(badJson, 'utf8'));
+
+        const storage = makeStorage({
+            download: vi.fn().mockResolvedValue({ data: new Blob([corruptedCompressed]), error: null }),
+        });
+        const svc = new ContractStateSnapshotService(makeRpc(), storage, makeDb());
+
+        const error = await svc.restore(SNAPSHOT_ID).catch((e) => e);
+
+        expect(error.message).toContain(STORAGE_PATH);
+    });
+
+    it('does not throw for a valid (non-corrupted) blob', async () => {
+        const blob = await buildCompressedBlob(FAKE_ENTRIES);
+        const storage = makeStorage({
+            download: vi.fn().mockResolvedValue({ data: blob, error: null }),
+        });
+        const svc = new ContractStateSnapshotService(makeRpc(), storage, makeDb());
+
+        const restored = await svc.restore(SNAPSHOT_ID);
+        expect(restored.entries).toHaveLength(FAKE_ENTRIES.length);
+    });
+});
+
+// ── Issue #1125 – restore() edge-case coverage ─────────────────────────────────
+
+describe('ContractStateSnapshotService.restore() – edge-case coverage (#1125)', () => {
+    const STORAGE_PATH = `${CONTRACT_ID}/${LEDGER_SEQ}.json.zlib`;
+
+    it('throws SnapshotStorageError with snapshot-identifying context when decompressed payload is malformed JSON', async () => {
+        const malformedJson = '{ "contractId": "CXXXX", "ledgerSequence": 123,';
+        const corruptedCompressed = await promisify(zlib.deflate)(
+            Buffer.from(malformedJson, 'utf8')
+        );
+
+        const storage = makeStorage({
+            download: vi.fn().mockResolvedValue({
+                data: new Blob([corruptedCompressed]),
+                error: null,
+            }),
+        });
+        const svc = new ContractStateSnapshotService(makeRpc(), storage, makeDb());
+
+        const error = await svc.restore(SNAPSHOT_ID).catch((e) => e);
+
+        expect(error).toBeInstanceOf(SnapshotStorageError);
+        expect(error.message).toContain(SNAPSHOT_ID);
+        expect(error.message).toContain(STORAGE_PATH);
+    });
+
+    it('successfully restores a snapshot with zero entries', async () => {
+        const emptyBlob = await buildCompressedBlob([]);
+        const storage = makeStorage({
+            download: vi.fn().mockResolvedValue({
+                data: emptyBlob,
+                error: null,
+            }),
+        });
+        const svc = new ContractStateSnapshotService(makeRpc(), storage, makeDb());
+
+        const restored = await svc.restore(SNAPSHOT_ID);
+
+        expect(restored.contractId).toBe(CONTRACT_ID);
+        expect(restored.ledgerSequence).toBe(LEDGER_SEQ);
+        expect(restored.entries).toStrictEqual([]);
+    });
+
+    it('round-trip snapshot → restore handles zero entries without error', async () => {
+        const rpc = makeRpc([]); // no entries
+
+        let capturedBlob: Buffer | null = null;
+        const storage = makeStorage({
+            upload: vi.fn().mockImplementation(async (_path: string, data: Buffer) => {
+                capturedBlob = data;
+                return { error: null };
+            }),
+            download: vi.fn().mockImplementation(async () => {
+                return { data: new Blob([capturedBlob!]), error: null };
+            }),
+        });
+
+        const svc = new ContractStateSnapshotService(rpc, storage, makeDb());
+
+        // Snapshot with no entries
+        const snap = await svc.snapshot(CONTRACT_ID, LEDGER_SEQ);
+        expect(snap.entryCount).toBe(0);
+
+        // Restore and verify it's still empty
+        const restored = await svc.restore(snap.id);
+        expect(restored.entries).toHaveLength(0);
+        expect(restored.contractId).toBe(CONTRACT_ID);
+        expect(restored.ledgerSequence).toBe(LEDGER_SEQ);
+    });
+
+    describe('Origin contract ID verification and force override (Issue #1288)', () => {
+        const CONTRACT_A = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM';
+        const CONTRACT_B = 'CBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB2KM';
+
+        it('rejects restore without force when target contract ID does not match origin contract ID', async () => {
+            const blob = await buildCompressedBlob(FAKE_ENTRIES);
+            const storage = makeStorage({
+                download: vi.fn().mockResolvedValue({ data: blob, error: null }),
+            });
+            const svc = new ContractStateSnapshotService(makeRpc(), storage, makeDb());
+
+            // CONTRACT_ID is CONTRACT_A in makeDb & buildCompressedBlob
+            await expect(
+                svc.restore(SNAPSHOT_ID, CONTRACT_B),
+            ).rejects.toThrow(SnapshotOriginMismatchError);
+
+            await expect(
+                svc.restore(SNAPSHOT_ID, { targetContractId: CONTRACT_B, force: false }),
+            ).rejects.toThrow(
+                `Snapshot origin contract "${CONTRACT_A}" does not match target contract "${CONTRACT_B}". Pass force: true to override.`,
+            );
+        });
+
+        it('succeeds restoring onto mismatched target contract ID when force is true', async () => {
+            const blob = await buildCompressedBlob(FAKE_ENTRIES);
+            const storage = makeStorage({
+                download: vi.fn().mockResolvedValue({ data: blob, error: null }),
+            });
+            const svc = new ContractStateSnapshotService(makeRpc(), storage, makeDb());
+
+            const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+            const restored = await svc.restore(SNAPSHOT_ID, CONTRACT_B, true);
+
+            expect(restored.contractId).toBe(CONTRACT_B);
+            expect(restored.originContractId).toBe(CONTRACT_A);
+            expect(restored.entries).toHaveLength(FAKE_ENTRIES.length);
+            expect(warnSpy).toHaveBeenCalledWith(
+                expect.stringContaining(`Restoring snapshot with origin contract ID "${CONTRACT_A}" onto mismatched target contract ID "${CONTRACT_B}"`),
+            );
+
+            warnSpy.mockRestore();
+        });
+
+        it('succeeds without force when target contract ID matches origin contract ID', async () => {
+            const blob = await buildCompressedBlob(FAKE_ENTRIES);
+            const storage = makeStorage({
+                download: vi.fn().mockResolvedValue({ data: blob, error: null }),
+            });
+            const svc = new ContractStateSnapshotService(makeRpc(), storage, makeDb());
+
+            const restored = await svc.restore(SNAPSHOT_ID, CONTRACT_A);
+
+            expect(restored.contractId).toBe(CONTRACT_A);
+            expect(restored.originContractId).toBe(CONTRACT_A);
+            expect(restored.entries).toHaveLength(FAKE_ENTRIES.length);
+        });
     });
 });

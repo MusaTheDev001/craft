@@ -22,7 +22,12 @@
  *   id, contract_id, ledger_sequence, storage_path, entry_count,
  *   compressed_bytes, created_at
  *
- * Issue: #794
+ * ## Additional storage keys
+ * To capture entries beyond the contract instance key, callers must supply
+ * them explicitly via the `additionalKeys` parameter to `snapshot()`. The
+ * instance key is always included automatically.
+ *
+ * Issue: #794, #968
  */
 
 import { xdr, Contract } from 'stellar-sdk';
@@ -65,6 +70,16 @@ export class SnapshotStorageError extends Error {
     }
 }
 
+export class SnapshotOriginMismatchError extends Error {
+    constructor(originContractId: string, targetContractId: string) {
+        super(
+            `Snapshot origin contract "${originContractId}" does not match target contract "${targetContractId}". ` +
+            `Pass force: true to override.`,
+        );
+        this.name = 'SnapshotOriginMismatchError';
+    }
+}
+
 // ── Data types ────────────────────────────────────────────────────────────────
 
 export interface LedgerEntryRecord {
@@ -78,6 +93,7 @@ export interface LedgerEntryRecord {
 
 export interface SnapshotPayload {
     contractId: string;
+    originContractId?: string;
     ledgerSequence: number;
     entries: LedgerEntryRecord[];
 }
@@ -93,8 +109,14 @@ export interface ContractSnapshot {
 
 export interface RestoredSnapshot {
     contractId: string;
+    originContractId?: string;
     ledgerSequence: number;
     entries: LedgerEntryRecord[];
+}
+
+export interface RestoreOptions {
+    targetContractId?: string;
+    force?: boolean;
 }
 
 // ── Narrow dependency interfaces for testability ──────────────────────────────
@@ -145,17 +167,25 @@ export class ContractStateSnapshotService {
     ) {}
 
     /**
-     * Capture all persistent ContractData entries for `contractId` at
-     * `ledgerSequence` and persist them compressed in Supabase Storage.
+     * Capture persistent ContractData entries for `contractId` at `ledgerSequence`
+     * and persist them compressed in Supabase Storage.
      *
-     * The service fetches the contract instance ledger key which gives
-     * access to the persistent storage entries via the Soroban RPC.
+     * Captures the contract instance entry by default. To include additional
+     * persistent storage entries, pass `additionalKeys`.
+     *
+     * @param contractId - Contract address string
+     * @param ledgerSequence - Ledger sequence number to capture
+     * @param additionalKeys - Optional array of additional LedgerKey entries to capture
      *
      * @throws SnapshotSizeLimitError  when uncompressed payload exceeds 10 MB
      * @throws SnapshotStorageError    when the upload to Supabase Storage fails
      * @throws Error                   on DB metadata insert failure
      */
-    async snapshot(contractId: string, ledgerSequence: number): Promise<ContractSnapshot> {
+    async snapshot(
+        contractId: string,
+        ledgerSequence: number,
+        additionalKeys: xdr.LedgerKey[] = [],
+    ): Promise<ContractSnapshot> {
         const instanceKey = xdr.LedgerKey.contractData(
             new xdr.LedgerKeyContractData({
                 contract: new Contract(contractId).address().toScAddress(),
@@ -164,7 +194,8 @@ export class ContractStateSnapshotService {
             }),
         );
 
-        const response = await this.rpc.getLedgerEntries(instanceKey);
+        const allKeys = [instanceKey, ...additionalKeys];
+        const response = await this.rpc.getLedgerEntries(...allKeys);
         const rawEntries = response.entries ?? [];
 
         const entries: LedgerEntryRecord[] = rawEntries.map((entry) => ({
@@ -173,7 +204,7 @@ export class ContractStateSnapshotService {
             liveUntilLedgerSeq: entry.liveUntilLedgerSeq,
         }));
 
-        const payload: SnapshotPayload = { contractId, ledgerSequence, entries };
+        const payload: SnapshotPayload = { contractId, originContractId: contractId, ledgerSequence, entries };
         const json = JSON.stringify(payload);
         const uncompressedBytes = Buffer.byteLength(json, 'utf8');
 
@@ -219,12 +250,35 @@ export class ContractStateSnapshotService {
      * Restore a previously captured snapshot for offline simulation.
      *
      * Downloads the compressed blob from Supabase Storage, decompresses it,
+     * verifies the snapshot origin matches the target contract ID (if specified),
      * and returns the deserialized ledger entries.
      *
+     * @param snapshotId - Unique ID of the snapshot in the database.
+     * @param targetOrOptions - Target contract ID to restore into, or RestoreOptions.
+     * @param forceParam - Force restore even if target contract ID does not match snapshot origin.
      * @throws SnapshotNotFoundError  when the snapshot ID does not exist in DB
      * @throws SnapshotStorageError   when the download from Supabase Storage fails
+     * @throws SnapshotStorageError   when the downloaded blob contains corrupted
+     *   or truncated JSON (identifies the snapshotId and storage_path)
+     * @throws SnapshotOriginMismatchError when target contract ID does not match
+     *   snapshot origin and force is not set to true.
      */
-    async restore(snapshotId: string): Promise<RestoredSnapshot> {
+    async restore(
+        snapshotId: string,
+        targetOrOptions?: string | RestoreOptions,
+        forceParam?: boolean,
+    ): Promise<RestoredSnapshot> {
+        let targetContractId: string | undefined;
+        let force = false;
+
+        if (typeof targetOrOptions === 'string') {
+            targetContractId = targetOrOptions;
+            force = typeof forceParam === 'boolean' ? forceParam : false;
+        } else if (targetOrOptions && typeof targetOrOptions === 'object') {
+            targetContractId = targetOrOptions.targetContractId;
+            force = Boolean(targetOrOptions.force);
+        }
+
         const { data: meta, error: metaError } = await this.db.findById(snapshotId);
         if (metaError || !meta) {
             throw new SnapshotNotFoundError(snapshotId);
@@ -237,10 +291,32 @@ export class ContractStateSnapshotService {
 
         const buffer = Buffer.from(await blob.arrayBuffer());
         const decompressed = await inflate(buffer);
-        const payload = JSON.parse(decompressed.toString('utf8')) as SnapshotPayload;
+
+        let payload: SnapshotPayload;
+        try {
+            payload = JSON.parse(decompressed.toString('utf8')) as SnapshotPayload;
+        } catch (err) {
+            throw new SnapshotStorageError(
+                'download',
+                `Corrupted snapshot payload for snapshotId="${snapshotId}" ` +
+                `at storage_path="${meta.storage_path}": ${(err as Error).message}`,
+            );
+        }
+
+        const originContractId = payload.originContractId ?? payload.contractId;
+
+        if (targetContractId && originContractId !== targetContractId) {
+            if (!force) {
+                throw new SnapshotOriginMismatchError(originContractId, targetContractId);
+            }
+            console.warn(
+                `[ContractStateSnapshotService] WARNING: Restoring snapshot with origin contract ID "${originContractId}" onto mismatched target contract ID "${targetContractId}" (force override enabled).`,
+            );
+        }
 
         return {
-            contractId: payload.contractId,
+            contractId: targetContractId ?? payload.contractId,
+            originContractId,
             ledgerSequence: payload.ledgerSequence,
             entries: payload.entries,
         };

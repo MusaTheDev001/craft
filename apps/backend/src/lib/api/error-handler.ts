@@ -56,16 +56,26 @@ function classifyUnknown(err: unknown): { code: ErrorCode; message: string } {
             }
         }
 
-        // External service signals
-        if (msg.includes('rate limit') || msg.includes('rate-limit') || msg.includes('429')) {
-            if (msg.includes('github')) return { code: 'GITHUB_RATE_LIMITED', message: err.message };
-            if (msg.includes('vercel')) return { code: 'VERCEL_RATE_LIMITED',  message: err.message };
-            return { code: 'GITHUB_RATE_LIMITED', message: err.message };
+        // External service signals — require an explicit provider hint before
+        // returning provider-specific codes; otherwise fall through to a
+        // generic INTERNAL_SERVER_ERROR so unrelated messages are not mislabelled.
+        const isRateLimited =
+            msg.includes('rate limit') ||
+            msg.includes('rate-limit') ||
+            /\b429\b/.test(msg);
+        if (isRateLimited) {
+            if (/\bgithub\b/.test(msg)) return { code: 'GITHUB_RATE_LIMITED', message: err.message };
+            if (/\bvercel\b/.test(msg)) return { code: 'VERCEL_RATE_LIMITED',  message: err.message };
+            return { code: 'INTERNAL_SERVER_ERROR', message: 'An unexpected error occurred.' };
         }
-        if (msg.includes('network') || msg.includes('fetch') || msg.includes('econnrefused')) {
-            if (msg.includes('github')) return { code: 'GITHUB_NETWORK_ERROR', message: 'Could not reach GitHub.' };
-            if (msg.includes('vercel')) return { code: 'VERCEL_NETWORK_ERROR',  message: 'Could not reach Vercel.' };
-            if (msg.includes('stellar')) return { code: 'STELLAR_ENDPOINT_UNREACHABLE', message: 'Could not reach Stellar.' };
+        const isNetworkError =
+            /\bnetwork\b/.test(msg) ||
+            /\bfetch\b/.test(msg) ||
+            msg.includes('econnrefused');
+        if (isNetworkError) {
+            if (/\bgithub\b/.test(msg)) return { code: 'GITHUB_NETWORK_ERROR', message: 'Could not reach GitHub.' };
+            if (/\bvercel\b/.test(msg)) return { code: 'VERCEL_NETWORK_ERROR',  message: 'Could not reach Vercel.' };
+            if (/\bstellar\b/.test(msg)) return { code: 'STELLAR_ENDPOINT_UNREACHABLE', message: 'Could not reach Stellar.' };
             return { code: 'INTERNAL_SERVER_ERROR', message: 'A network error occurred.' };
         }
         if (msg.includes('database') || msg.includes('supabase') || msg.includes('postgres')) {

@@ -3,6 +3,8 @@ import type { ContractAbiSchema } from './upgrade-orchestrator';
 
 const mocks = vi.hoisted(() => ({
   mockSimulate: vi.fn(),
+  mockSubmitTransaction: vi.fn(),
+  mockSend: vi.fn(),
   mockFromXDR: vi.fn(),
 }));
 
@@ -26,10 +28,11 @@ vi.mock('stellar-sdk', () => ({
 vi.mock('./soroban', () => ({
   createSorobanClient: vi.fn(() => ({
     simulateTransaction: mocks.mockSimulate,
+    sendTransaction: mocks.mockSend,
   })),
 }));
 
-const { diffAbiSchemas, orchestrateContractUpgrade } = await import('./upgrade-orchestrator');
+const { diffAbiSchemas, orchestrateContractUpgrade, submitUpgradeTransaction } = await import('./upgrade-orchestrator');
 
 function makeSchema(overrides?: Partial<ContractAbiSchema>): ContractAbiSchema {
   return {
@@ -57,7 +60,7 @@ describe('diffAbiSchemas', () => {
     expect(report.breakingChanges).toHaveLength(0);
   });
 
-  it('detects added keys as non-breaking', () => {
+  it('detects added optional keys as non-breaking', () => {
     const next = makeSchema({
       storageKeys: [
         ...currentSchema.storageKeys,
@@ -69,6 +72,22 @@ describe('diffAbiSchemas', () => {
     expect(report.changes).toHaveLength(1);
     expect(report.changes[0].type).toBe('added');
     expect(report.changes[0].key).toBe('new_key');
+  });
+
+  it('flags added required keys as breaking', () => {
+    const next = makeSchema({
+      storageKeys: [
+        ...currentSchema.storageKeys,
+        { key: 'new_required_key', type: 'instance', required: true },
+      ],
+    });
+    const report = diffAbiSchemas(currentSchema, next);
+    expect(report.safe).toBe(false);
+    expect(report.changes).toHaveLength(1);
+    expect(report.changes[0].type).toBe('added');
+    expect(report.breakingChanges).toHaveLength(1);
+    expect(report.breakingChanges[0].type).toBe('added');
+    expect(report.breakingChanges[0].key).toBe('new_required_key');
   });
 
   it('detects removed optional keys as non-breaking', () => {
@@ -147,6 +166,20 @@ describe('diffAbiSchemas', () => {
     expect(report.summary).toContain('admin');
   });
 
+  it('includes newly-required keys in breaking change summary', () => {
+    const next = makeSchema({
+      version: '2.0.0',
+      storageKeys: [
+        ...currentSchema.storageKeys,
+        { key: 'new_required_fee', type: 'persistent', required: true },
+      ],
+    });
+    const report = diffAbiSchemas(currentSchema, next);
+    expect(report.summary).toContain('UNSAFE');
+    expect(report.summary).toContain('new_required_fee');
+    expect(report.summary).toContain('added as REQUIRED');
+  });
+
   it('handles empty storage keys', () => {
     const empty: ContractAbiSchema = { version: '1.0.0', storageKeys: [] };
     const report = diffAbiSchemas(empty, empty);
@@ -168,7 +201,134 @@ describe('diffAbiSchemas', () => {
     expect(report.changes.find((c) => c.type === 'added')?.key).toBe('new_flag');
     expect(report.changes.find((c) => c.type === 'removed')?.key).toBe('admin');
     expect(report.changes.find((c) => c.type === 'type_changed')?.key).toBe('balance');
+    // admin removed (required) + balance type changed + new_flag added (required) = 3 breaking
+    expect(report.breakingChanges).toHaveLength(3);
+  });
+
+  // ── Function signature diffing (Issue #969) ────────────────────────────────
+
+  it('detects removed functions as breaking changes', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+        { name: 'balance', paramTypes: ['string'], returnType: 'bigint' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'balance', paramTypes: ['string'], returnType: 'bigint' },
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(false);
+    expect(report.breakingChanges).toHaveLength(1);
+    expect(report.breakingChanges[0].type).toBe('function_removed');
+    expect(report.breakingChanges[0].key).toBe('transfer');
+  });
+
+  it('detects changed function parameter types as breaking', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['Address', 'bigint'], returnType: 'void' },
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(false);
+    expect(report.breakingChanges).toHaveLength(1);
+    expect(report.breakingChanges[0].type).toBe('function_signature_changed');
+    expect(report.breakingChanges[0].key).toBe('transfer');
+  });
+
+  it('detects changed function return type as breaking', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'calculate', paramTypes: ['bigint', 'bigint'], returnType: 'bigint' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'calculate', paramTypes: ['bigint', 'bigint'], returnType: 'string' },
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(false);
+    expect(report.breakingChanges).toHaveLength(1);
+    expect(report.breakingChanges[0].type).toBe('function_signature_changed');
+  });
+
+  it('allows adding new functions (non-breaking)', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+        { name: 'approve', paramTypes: ['string', 'bigint'], returnType: 'void' },
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(true);
+    expect(report.breakingChanges).toHaveLength(0);
+  });
+
+  it('maintains backward compatibility when functions are not supplied', () => {
+    const current = makeSchema(); // No functions field
+    const next = makeSchema(); // No functions field
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(true);
+    expect(report.changes).toHaveLength(0);
+  });
+
+  it('includes function changes in summary', () => {
+    const current = makeSchema({
+      version: '1.0.0',
+      functions: [
+        { name: 'transfer', paramTypes: ['string', 'bigint'], returnType: 'void' },
+      ],
+    });
+    const next = makeSchema({
+      version: '2.0.0',
+      functions: [],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.summary).toContain('Function signatures');
+    expect(report.summary).toContain('Removed');
+    expect(report.summary).toContain('transfer');
+  });
+
+  it('detects multiple function changes together', () => {
+    const current = makeSchema({
+      functions: [
+        { name: 'foo', paramTypes: ['string'], returnType: 'void' },
+        { name: 'bar', paramTypes: ['bigint'], returnType: 'bigint' },
+        { name: 'baz', paramTypes: [], returnType: 'string' },
+      ],
+    });
+    const next = makeSchema({
+      functions: [
+        { name: 'bar', paramTypes: ['bigint'], returnType: 'string' }, // changed return type
+        { name: 'baz', paramTypes: [], returnType: 'string' },
+        { name: 'qux', paramTypes: ['string'], returnType: 'void' }, // new
+      ],
+    });
+
+    const report = diffAbiSchemas(current, next);
+    expect(report.safe).toBe(false);
     expect(report.breakingChanges).toHaveLength(2);
+    const breakTypes = report.breakingChanges.map((c) => c.type).sort();
+    expect(breakTypes).toEqual(['function_removed', 'function_signature_changed']);
   });
 });
 
@@ -194,6 +354,8 @@ describe('orchestrateContractUpgrade', () => {
       expect(result.dryRun).toBe(false);
       expect(result.diffReport.safe).toBe(true);
     }
+    expect(mocks.mockSimulate).not.toHaveBeenCalled();
+    expect(mocks.mockSubmitTransaction).not.toHaveBeenCalled();
   });
 
   it('blocks upgrade when breaking changes are detected', async () => {
@@ -224,6 +386,22 @@ describe('orchestrateContractUpgrade', () => {
     }
   });
 
+  it('returns specific error message with populated diffReport when dryRun=true without upgradeTransactionXdr', async () => {
+    const result = await orchestrateContractUpgrade({
+      currentSchema,
+      newSchema: makeSchema(),
+      dryRun: true,
+    });
+
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error).toBe('dryRun requires upgradeTransactionXdr to simulate the transaction.');
+      expect(result.diffReport).toBeDefined();
+      expect(result.diffReport?.safe).toBe(true);
+      expect(result.diffReport?.changes).toHaveLength(0);
+    }
+  });
+
   it('performs simulation when dryRun=true with valid XDR', async () => {
     mocks.mockSimulate.mockResolvedValue({});
 
@@ -244,6 +422,7 @@ describe('orchestrateContractUpgrade', () => {
       'Test SDF Network ; September 2015',
     );
     expect(mocks.mockSimulate).toHaveBeenCalledWith(mockTx);
+    expect(mocks.mockSubmitTransaction).not.toHaveBeenCalled();
   });
 
   it('handles simulation errors gracefully', async () => {
@@ -284,3 +463,37 @@ describe('orchestrateContractUpgrade', () => {
     }
   });
 });
+
+describe('submitUpgradeTransaction', () => {
+  const signedTxXdr = 'AAAAAgAAAABb8PsSeJ2XH7dDrHV6I90DH2eDBFezq92rLvdUesFGzgAAAGQADKQ7';
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('throws an error and does NOT invoke sendTransaction when dryRun is true', async () => {
+    await expect(
+      submitUpgradeTransaction({
+        signedTxXdr,
+        dryRun: true,
+      }),
+    ).rejects.toThrow('Invariant violation: submitUpgradeTransaction reached while dryRun is true');
+
+    expect(mocks.mockSend).not.toHaveBeenCalled();
+    expect(mocks.mockSend).toHaveBeenCalledTimes(0);
+  });
+
+  it('submits transaction when dryRun is false or undefined', async () => {
+    const mockResponse = { status: 'PENDING', hash: 'tx-123' };
+    mocks.mockSend.mockResolvedValue(mockResponse);
+
+    const result = await submitUpgradeTransaction({
+      signedTxXdr,
+      dryRun: false,
+    });
+
+    expect(result).toBe(mockResponse);
+    expect(mocks.mockSend).toHaveBeenCalledTimes(1);
+  });
+});
+

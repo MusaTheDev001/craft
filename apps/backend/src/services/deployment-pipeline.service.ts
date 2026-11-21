@@ -148,6 +148,29 @@ export const PIPELINE_STAGE_GRAPH: DeploymentNode[] = [
     { id: 'complete', dependsOn: ['verify_contract'] },
 ];
 
+/**
+ * Verifies that a deployed Soroban contract is live and callable.
+ *
+ * Injected so tests can deterministically force success or failure. The
+ * default implementation is a no-op placeholder until a real Soroban RPC
+ * probe is implemented.
+ */
+export type ContractVerifier = (
+    deploymentId: string,
+    correlationId: string,
+) => Promise<void>;
+
+/**
+ * Placeholder contract verifier — always succeeds.
+ *
+ * TODO: Replace with a real Soroban RPC probe that polls the network for the
+ * contract instance footprint. Until then, this check is a no-op so that
+ * production deployments are never failed by simulated outcomes.
+ */
+export const noopContractVerifier: ContractVerifier = async () => {
+    // Intentionally empty — see TODO above.
+};
+
 type StageFailure = { kind: 'failure'; result: DeploymentPipelineResult };
 type StageSuccess = { kind: 'success'; patch: Partial<PipelineContext> };
 type StageOutcome = StageFailure | StageSuccess;
@@ -198,6 +221,7 @@ export class DeploymentPipelineService {
         private readonly _deploymentUpdateService: Pick<DeploymentUpdateService, 'rollbackUpdate'> | null = null,
         private readonly _commitStatusService: Pick<GitHubCommitStatusService, 'reportPending' | 'reportSuccess' | 'reportFailure'> = githubCommitStatusService,
         private readonly _buildCacheService: BuildCacheService = buildCacheService,
+        private readonly _contractVerifier: ContractVerifier = noopContractVerifier,
     ) {}
 
     /**
@@ -975,24 +999,17 @@ export class DeploymentPipelineService {
     }
 
     /**
-     * Simulates a check to ensure the Soroban contract is live and callable.
-     * 
+     * Runs the injected contract verifier.
+     *
+     * NOTE: This is a placeholder check. The default verifier is a no-op that
+     * always succeeds; a real Soroban RPC probe will be wired in later. Tests
+     * inject a deterministic verifier to exercise success and failure paths.
+     *
      * @throws {RetryableError} If the verification times out
      * @throws {Error} If the contract is not live or found
      */
     private async verifyContractDeployment(deploymentId: string, correlationId: string): Promise<void> {
-        // Simulation of network verification logic
-        // In production, this would poll Soroban RPC to check for contract instance footprint
-        
-        // Simulated verification loop
-        await new Promise(resolve => setTimeout(resolve, 100));
-
-        const randomOutcome = Math.random();
-        if (randomOutcome < 0.05) {
-            throw new RetryableError('Contract verification timed out: RPC endpoint took too long to respond');
-        } else if (randomOutcome < 0.1) {
-            throw new Error('Contract instance not found on the current network ledger');
-        }
+        await this._contractVerifier(deploymentId, correlationId);
     }
 }
 
@@ -1006,4 +1023,5 @@ export const deploymentPipelineService = new DeploymentPipelineService(
     deploymentUpdateService,
     githubCommitStatusService,
     buildCacheService,
+    noopContractVerifier,
 );

@@ -30,6 +30,18 @@ describe('corsHeaders', () => {
         });
     });
 
+    it('sets Vary: Origin even when origin is disallowed', () => {
+        withEnv({ ALLOWED_ORIGINS: 'https://craft.app', NODE_ENV: 'production' }, () => {
+            expect(corsHeaders('https://evil.example.com')['Vary']).toBe('Origin');
+        });
+    });
+
+    it('sets Vary: Origin when origin is missing', () => {
+        withEnv({ ALLOWED_ORIGINS: 'https://craft.app', NODE_ENV: 'production' }, () => {
+            expect(corsHeaders(null)['Vary']).toBe('Origin');
+        });
+    });
+
     it('omits ACAO header for a disallowed origin', () => {
         withEnv({ ALLOWED_ORIGINS: 'https://craft.app', NODE_ENV: 'production' }, () => {
             const headers = corsHeaders('https://evil.example.com');
@@ -62,6 +74,15 @@ describe('corsHeaders', () => {
             const headers = corsHeaders('https://craft.app');
             expect(headers['Access-Control-Allow-Methods']).toBeTruthy();
             expect(headers['Access-Control-Allow-Headers']).toBeTruthy();
+        });
+    });
+
+    it('allows the custom headers the SDK sends', () => {
+        withEnv({ ALLOWED_ORIGINS: 'https://craft.app', NODE_ENV: 'production' }, () => {
+            const allowed = corsHeaders('https://craft.app')['Access-Control-Allow-Headers'] ?? '';
+            const names = allowed.split(',').map((h) => h.trim().toLowerCase());
+            expect(names).toContain('api-version');
+            expect(names).toContain('idempotency-key');
         });
     });
 
@@ -98,6 +119,25 @@ describe('handlePreflight', () => {
             const res = handlePreflight(req);
             expect(res.status).toBe(204);
             expect(res.headers.get('Access-Control-Allow-Origin')).toBeNull();
+        });
+    });
+
+    it('always sends Vary: Origin on preflight responses', () => {
+        withEnv({ ALLOWED_ORIGINS: 'https://craft.app', NODE_ENV: 'production' }, () => {
+            for (const origin of ['https://craft.app', 'https://attacker.com', null]) {
+                const req = { headers: { get: (h: string) => h === 'origin' ? origin : null } };
+                expect(handlePreflight(req).headers.get('Vary')).toBe('Origin');
+            }
+        });
+    });
+
+    it('advertises API-Version and Idempotency-Key in preflight Allow-Headers', () => {
+        withEnv({ ALLOWED_ORIGINS: 'https://craft.app', NODE_ENV: 'production' }, () => {
+            const req = { headers: { get: (h: string) => h === 'origin' ? 'https://craft.app' : null } };
+            const allowed = handlePreflight(req).headers.get('Access-Control-Allow-Headers') ?? '';
+            const names = allowed.split(',').map((h) => h.trim().toLowerCase());
+            expect(names).toContain('api-version');
+            expect(names).toContain('idempotency-key');
         });
     });
 });

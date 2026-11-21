@@ -1,5 +1,16 @@
 export type TemplateCategory = 'dex' | 'lending' | 'payment' | 'asset-issuance';
 
+/** All allowed template categories — use for validation and documentation. */
+export const TEMPLATE_CATEGORIES: readonly TemplateCategory[] = [
+    'dex',
+    'lending',
+    'payment',
+    'asset-issuance',
+] as const;
+
+/** All allowed blockchain types — use for validation and documentation. */
+export const BLOCKCHAIN_TYPES: readonly ['stellar'][] = ['stellar'] as const;
+
 export interface Template {
     id: string;
     name: string;

@@ -15,6 +15,7 @@
  */
 
 import { createClient } from '@/lib/supabase/server';
+import { createLogger } from '@/lib/api/logger';
 
 // ── Result types ──────────────────────────────────────────────────────────────
 
@@ -78,6 +79,15 @@ export interface PurgeOrphanedArtifactsOptions {
     batchLimit?: number;
     /** Override the current time (testing only). */
     now?: Date;
+    /**
+     * When true, compute and return the same result shape a real run would
+     * produce, but skip both the storage `remove()` call and the audit-log
+     * insert. Lets an operator preview exactly what a purge would delete
+     * before running it against production data.
+     */
+    dryRun?: boolean;
+    /** Correlation ID tying every log entry to one cron invocation (default: freshly generated). */
+    correlationId?: string;
 }
 
 const DEFAULT_ARTIFACT_BUCKET = 'deployment-artifacts';
@@ -87,11 +97,11 @@ const ORPHAN_BATCH_LIMIT = 100;
 /**
  * Derive the deployment id an artifact belongs to from its object path.
  * Supports both `<deploymentId>/bundle.zip` (folder) and `<deploymentId>.zip`
- * (flat) layouts: take the first path segment, then strip any file extension.
+ * (flat) layouts: take the first path segment, then strip the extension suffix.
  */
 export function deploymentIdFromArtifactPath(path: string): string {
     const firstSegment = path.split('/')[0] ?? path;
-    return firstSegment.replace(/\.[^.]+$/, '');
+    return firstSegment.split('.')[0] ?? firstSegment;
 }
 
 // ── Service ───────────────────────────────────────────────────────────────────
@@ -220,6 +230,9 @@ export class CleanupService {
      *     per run to bound cron work.
      *   - Audit: every deleted orphan is logged to orphaned_artifact_cleanup_log
      *     with its size and age.
+     *   - Dry run: pass `{ dryRun: true }` to compute and return the same
+     *     result shape without deleting anything or writing an audit row —
+     *     use it to preview a run against production data first.
      */
     async purgeOrphanedArtifacts(
         options: PurgeOrphanedArtifactsOptions = {},
@@ -230,6 +243,10 @@ export class CleanupService {
         const batchLimit = options.batchLimit ?? ORPHAN_BATCH_LIMIT;
         const now = options.now ?? new Date();
         const retentionMs = retentionHours * 60 * 60 * 1000;
+        const correlationId = options.correlationId ?? crypto.randomUUID();
+        const log = createLogger({ correlationId, service: 'cleanup-orphaned-artifacts' });
+
+        log.info('Orphaned artifact purge started', { bucket, retentionHours, batchLimit });
 
         const supabase = createClient();
 
@@ -239,6 +256,7 @@ export class CleanupService {
             .list('', { limit: 1000, sortBy: { column: 'created_at', order: 'asc' } });
 
         if (listError) {
+            log.error('Failed to list storage artifacts', listError, { bucket });
             throw new Error(`Failed to list storage artifacts: ${listError.message}`);
         }
 
@@ -257,6 +275,7 @@ export class CleanupService {
                 .in('id', candidateIds);
 
             if (depError) {
+                log.error('Failed to cross-reference deployments', depError, { bucket });
                 throw new Error(`Failed to cross-reference deployments: ${depError.message}`);
             }
             for (const row of rows ?? []) existingIds.add((row as { id: string }).id);
@@ -288,13 +307,30 @@ export class CleanupService {
         const batchLimitReached = orphans.length > batchLimit;
         const toDelete = orphans.slice(0, batchLimit);
 
-        // 5. Delete and audit each orphan.
+        // 5. Dry run: report the candidate set without deleting or auditing.
+        if (options.dryRun) {
+            return {
+                recordsDeleted: toDelete.length,
+                description: `Orphaned deployment artifacts purged from ${bucket} (dry run)`,
+                executedAt: now,
+                orphansDeleted: toDelete,
+                scanned: artifacts.length,
+                skippedWithinRetention,
+                batchLimitReached,
+            };
+        }
+
+        // 6. Delete and audit each orphan.
         if (toDelete.length > 0) {
             const { error: removeError } = await supabase.storage
                 .from(bucket)
                 .remove(toDelete.map((o) => o.path));
 
             if (removeError) {
+                log.error('Orphaned artifact batch deletion failed', removeError, {
+                    bucket,
+                    batchSize: toDelete.length,
+                });
                 throw new Error(`Failed to delete orphaned artifacts: ${removeError.message}`);
             }
 
@@ -311,9 +347,23 @@ export class CleanupService {
 
             if (auditError) {
                 // Audit failures are logged but must not mask a successful purge.
-                console.error('Orphan cleanup audit insert failed:', auditError.message);
+                log.error('Orphan cleanup audit insert failed', auditError, { bucket });
             }
+
+            log.info('Orphaned artifact batch deleted', {
+                bucket,
+                batchSize: toDelete.length,
+                bytesFreed: toDelete.reduce((sum, o) => sum + o.sizeBytes, 0),
+            });
         }
+
+        log.info('Orphaned artifact purge completed', {
+            bucket,
+            scanned: artifacts.length,
+            deleted: toDelete.length,
+            skippedWithinRetention,
+            batchLimitReached,
+        });
 
         return {
             recordsDeleted: toDelete.length,

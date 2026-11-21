@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { checkRateLimit, getRateLimitKey, type RateLimitConfig } from './rate-limit';
 import { createClient } from '@/lib/supabase/server';
+import { createLogger, resolveCorrelationId } from './logger';
 
 /**
  * Multi-Tier Rate Limiting with Sliding Window
@@ -14,6 +15,36 @@ import { createClient } from '@/lib/supabase/server';
  *   - enterprise: 10000 req/min general, 1000 req/min sensitive
  *
  * Sensitive endpoints: auth, payments, deployments
+ *
+ * See "Rate Limiting, Idempotency, and Tier Enforcement" in CONTRIBUTING.md
+ * for the full reference of tier limits and the RATE_LIMIT_DISABLED env var.
+ *
+ * ── Shared store (#1147 audit) ─────────────────────────────────────────────
+ *
+ * withTierRateLimit delegates to checkRateLimit() from rate-limit.ts. Both
+ * middlewares therefore share the same module-level in-memory `store` (a
+ * Map<key, timestamps[]>).  Consequently:
+ *
+ *   - A rejection from withTierRateLimit increments the shared store entry.
+ *   - Wrapping the SAME route with BOTH withTierRateLimit AND withRateLimit
+ *     (or calling checkRateLimit directly in the same handler) would cause
+ *     a rejected request to consume quota in both limiters simultaneously —
+ *     double-counting the hit.
+ *
+ * Audit result (apps/backend/src/app/api — 2026-08-28):
+ *   No route currently applies both withTierRateLimit AND withRateLimit /
+ *   checkRateLimit to the same request path.  Routes audited:
+ *     - auth/signin, auth/signup, auth/reset-password: withRateLimit only
+ *     - deployments/route: checkDeploymentRateLimit only (own store)
+ *     - payments/checkout: withAuth only, no plain rate limit
+ *     - error-reports/route: withRateLimit only
+ *   No double-wrapped routes were found.
+ *
+ * IMPORTANT: To preserve this invariant, do NOT add withRateLimit or a direct
+ * checkRateLimit call to any route that already uses withTierRateLimit, and
+ * vice-versa.  If quota isolation between the two middlewares is required in
+ * the future, introduce a second, independent store (or a namespaced key
+ * prefix) before combining them on the same route.
  */
 
 export interface TierRateLimitConfig {
@@ -54,26 +85,38 @@ function isSensitiveEndpoint(route: string): boolean {
  * Get user subscription tier from the database.
  * Anonymous users get 'free' tier.
  */
-async function getUserTier(req: NextRequest): Promise<'free' | 'pro' | 'enterprise'> {
+async function getUserTier(req: NextRequest, routeKey: string): Promise<'free' | 'pro' | 'enterprise'> {
   try {
     const supabase = createClient();
     const {
       data: { user },
+      error: userError,
     } = await supabase.auth.getUser();
+
+    if (userError) throw userError;
 
     if (!user) {
       return 'free';
     }
 
-    const { data: profile } = await supabase
+    const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('subscription_tier')
       .eq('id', user.id)
       .single();
 
+    if (profileError) throw profileError;
+
     return (profile?.subscription_tier ?? 'free') as 'free' | 'pro' | 'enterprise';
   } catch (err) {
-    // On any error, fall back to free tier (conservative)
+    const errorMessage = err instanceof Error ? err.message : String(err);
+    createLogger({
+      correlationId: resolveCorrelationId(req),
+      route: routeKey,
+    }).warn('Subscription tier lookup failed; defaulting to free tier', {
+      route: routeKey,
+      error: errorMessage,
+    });
     return 'free';
   }
 }
@@ -97,7 +140,7 @@ export function withTierRateLimit<TParams = {}>(routeKey: string) {
         return handler(req, ctx);
       }
 
-      const tier = await getUserTier(req);
+      const tier = await getUserTier(req, routeKey);
       const isSensitive = isSensitiveEndpoint(routeKey);
       const tierLimits = isSensitive ? SENSITIVE_TIER_LIMITS : GENERAL_TIER_LIMITS;
       const config = tierLimits[tier];

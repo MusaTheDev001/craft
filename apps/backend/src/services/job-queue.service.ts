@@ -26,7 +26,7 @@
  *
  * Persistence
  * ────────────
- *   All state lives in Supabase (see migration 014_job_queue.sql), so jobs
+ *   All state lives in Supabase (see migration 025_job_queue.sql), so jobs
  *   survive server restarts automatically.
  *
  * Design doc properties satisfied:
@@ -79,7 +79,7 @@ export interface DLQRecord {
     payload: Record<string, unknown>;
     failure_reason: string;
     attempts: number;
-    reprocess_status: 'pending' | 'succeeded' | 'failed';
+    reprocess_status: 'pending' | 'in_progress' | 'succeeded' | 'failed';
     reprocessed_at?: string | null;
     created_at: string;
 }
@@ -108,6 +108,9 @@ export class JobQueueService {
 
     /** Active worker loop abort signals. */
     private readonly _workerControllers: AbortController[] = [];
+
+    /** In-memory guard set for DLQ entries currently being reprocessed. */
+    private readonly _reprocessingDlqIds = new Set<string>();
 
     /** Unique prefix for worker IDs created by this instance. */
     private readonly _instanceId: string;
@@ -236,40 +239,65 @@ export class JobQueueService {
 
     /**
      * Reprocess a dead-letter entry by re-enqueuing the original payload.
-     * Guards against double-reprocessing.
+        * Claims the entry atomically in the database before re-enqueueing.
+     * Only marks the entry as succeeded after enqueue actually resolves.
      */
     async reprocessDLQEntry(dlqId: string): Promise<EnqueueResult> {
         const supabase = createClient();
 
-        // Load the DLQ entry
-        const { data: entry, error: fetchError } = await supabase
-            .from('job_dlq')
-            .select('*')
-            .eq('id', dlqId)
-            .single();
-
-        if (fetchError || !entry) {
-            throw new Error(`DLQ entry not found: ${dlqId}`);
+        if (this._reprocessingDlqIds.has(dlqId)) {
+            throw new Error(`DLQ entry ${dlqId} is already being reprocessed`);
         }
 
-        if (entry.reprocess_status !== 'pending') {
-            throw new Error(`DLQ entry ${dlqId} has already been reprocessed (status: ${entry.reprocess_status})`);
+        const { data, error: claimError } = await supabase
+            .rpc('claim_dlq_reprocess_entry', { p_dlq_id: dlqId });
+
+        if (claimError) {
+            throw new Error(`Failed to claim DLQ entry ${dlqId}: ${claimError.message}`);
         }
 
-        // Mark as in-flight immediately to prevent duplicate reprocessing
-        await supabase
-            .from('job_dlq')
-            .update({ reprocess_status: 'succeeded', reprocessed_at: new Date().toISOString() })
-            .eq('id', dlqId);
+        const entry = (Array.isArray(data) ? data[0] : data) as DLQRecord | null;
+        if (!entry) {
+            const { data: existing, error: fetchError } = await supabase
+                .from('job_dlq')
+                .select('*')
+                .eq('id', dlqId)
+                .single();
+            if (fetchError || !existing) throw new Error(`DLQ entry not found: ${dlqId}`);
+            throw new Error(`DLQ entry ${dlqId} has already been reprocessed (status: ${existing.reprocess_status})`);
+        }
 
-        // Re-enqueue with higher max_attempts so the job gets fresh retries
-        const result = await this.enqueue(
-            entry.job_type,
-            entry.payload,
-            { priority: entry.priority, maxAttempts: DEFAULT_MAX_ATTEMPTS },
-        );
+        this._reprocessingDlqIds.add(dlqId);
 
-        return result;
+        try {
+            // Re-enqueue with higher max_attempts so the job gets fresh retries
+            const result = await this.enqueue(
+                entry.job_type,
+                entry.payload,
+                { priority: entry.priority, maxAttempts: DEFAULT_MAX_ATTEMPTS },
+            );
+
+            // Only mark succeeded after the enqueue actually succeeds
+            await supabase
+                .from('job_dlq')
+                .update({ reprocess_status: 'succeeded', reprocessed_at: new Date().toISOString() })
+                .eq('id', dlqId);
+
+            return result;
+        } catch (err) {
+            // Revert the entry so it can be retried
+            const message = err instanceof Error ? err.message : String(err);
+            await supabase
+                .from('job_dlq')
+                .update({
+                    reprocess_status: 'pending',
+                    failure_reason: message,
+                })
+                .eq('id', dlqId);
+            throw err;
+        } finally {
+            this._reprocessingDlqIds.delete(dlqId);
+        }
     }
 
     // ── Internal helpers ───────────────────────────────────────────────────────
@@ -341,7 +369,7 @@ export class JobQueueService {
         try {
             const result = await handler(job);
 
-            await supabase
+            const { data: updated } = await supabase
                 .from('job_queue')
                 .update({
                     status: 'completed',
@@ -349,7 +377,16 @@ export class JobQueueService {
                     completed_at: new Date().toISOString(),
                     updated_at: new Date().toISOString(),
                 })
-                .eq('id', job.id);
+                .eq('id', job.id)
+                .eq('attempts', job.attempts)
+                .select('id');
+
+            // If no rows matched, the job was reclaimed by another worker (fencing)
+            if (!updated || updated.length === 0) {
+                console.warn(
+                    `[JobQueueService] Fencing prevented stale completion for job ${job.id} (attempts: ${job.attempts})`,
+                );
+            }
         } catch (err: unknown) {
             const message = err instanceof Error ? err.message : String(err);
             await this._failJob(job, message);
@@ -365,27 +402,7 @@ export class JobQueueService {
         const exhausted = newAttempts >= job.max_attempts;
 
         if (exhausted) {
-            // Move to DLQ
-            await supabase.from('job_dlq').insert({
-                original_job_id: job.id,
-                job_type: job.job_type,
-                priority: job.priority,
-                payload: job.payload,
-                failure_reason: reason,
-                attempts: newAttempts,
-                reprocess_status: 'pending',
-            });
-
-            await supabase
-                .from('job_queue')
-                .update({
-                    status: 'dead',
-                    attempts: newAttempts,
-                    error_message: reason,
-                    dead_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
-                })
-                .eq('id', job.id);
+            await this._moveToDLQ(job, reason, newAttempts);
         } else {
             await supabase
                 .from('job_queue')
@@ -396,8 +413,35 @@ export class JobQueueService {
                     worker_id: null,
                     updated_at: new Date().toISOString(),
                 })
-                .eq('id', job.id);
+                .eq('id', job.id)
+                .eq('attempts', job.attempts);
         }
+    }
+
+    private async _moveToDLQ(job: JobRecord, reason: string, attempts: number): Promise<void> {
+        const supabase = createClient();
+
+        await supabase.from('job_dlq').insert({
+            original_job_id: job.id,
+            job_type: job.job_type,
+            priority: job.priority,
+            payload: job.payload,
+            failure_reason: reason,
+            attempts,
+            reprocess_status: 'pending',
+        });
+
+        await supabase
+            .from('job_queue')
+            .update({
+                status: 'dead',
+                attempts,
+                error_message: reason,
+                dead_at: new Date().toISOString(),
+                updated_at: new Date().toISOString(),
+            })
+            .eq('id', job.id)
+            .eq('attempts', job.attempts);
     }
 
     /**
@@ -416,8 +460,12 @@ export class JobQueueService {
     // ── Stalled job recovery ───────────────────────────────────────────────────
 
     /**
-     * Requeue jobs that have been `running` beyond STALLED_JOB_TIMEOUT_MS.
-     * Call periodically from a cron handler to recover from crashed workers.
+    * Recover jobs that have been `running` beyond STALLED_JOB_TIMEOUT_MS.
+    * A recovery consumes an attempt just like a handler failure.
+     *
+     * Fencing: Only reset a stalled job if its worker_id still matches the one that
+     * originally claimed it. This prevents interleaving with a slow-but-still-running
+     * original worker whose completion write might arrive just as recovery fires.
      */
     async recoverStalledJobs(): Promise<number> {
         const supabase = createClient();
@@ -425,17 +473,73 @@ export class JobQueueService {
 
         const { data, error } = await supabase
             .from('job_queue')
-            .update({
-                status: 'pending',
-                worker_id: null,
-                updated_at: new Date().toISOString(),
-            })
+            .select('*')
             .eq('status', 'running')
-            .lt('started_at', cutoff)
-            .select('id');
+            .lt('started_at', cutoff);
 
         if (error) throw new Error(`recoverStalledJobs failed: ${error.message}`);
-        return (data ?? []).length;
+
+        let recovered = 0;
+        for (const job of (data ?? []) as JobRecord[]) {
+            // Use a specialized recovery path that coordinates with _executeJob fencing:
+            // Only mark as failed if the job is still running with the same worker_id.
+            await this._recoverStalledJob(job);
+            recovered++;
+        }
+        return recovered;
+    }
+
+    /**
+     * Recover a single stalled job with proper fencing against concurrent completion writes.
+     * Only proceeds if the job is still in the expected stalled state (running, same worker_id).
+     */
+    private async _recoverStalledJob(job: JobRecord): Promise<void> {
+        const supabase = createClient();
+        const newAttempts = job.attempts + 1;
+        const exhausted = newAttempts >= job.max_attempts;
+        const reason = `Job stalled beyond ${STALLED_JOB_TIMEOUT_MS}ms`;
+
+        if (exhausted) {
+            // Move directly to DLQ with fencing: only if still stalled with same worker
+            await supabase
+                .from('job_queue')
+                .update({
+                    status: 'dead',
+                    attempts: newAttempts,
+                    error_message: reason,
+                    dead_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', job.id)
+                .eq('status', 'running')
+                .eq('worker_id', job.worker_id)
+                .eq('attempts', job.attempts);
+
+            await supabase.from('job_dlq').insert({
+                original_job_id: job.id,
+                job_type: job.job_type,
+                priority: job.priority,
+                payload: job.payload,
+                failure_reason: reason,
+                attempts: newAttempts,
+                reprocess_status: 'pending',
+            });
+        } else {
+            // Return to pending for retry with fencing: only if still stalled with same worker
+            await supabase
+                .from('job_queue')
+                .update({
+                    status: 'pending',
+                    attempts: newAttempts,
+                    error_message: reason,
+                    worker_id: null,
+                    updated_at: new Date().toISOString(),
+                })
+                .eq('id', job.id)
+                .eq('status', 'running')
+                .eq('worker_id', job.worker_id)
+                .eq('attempts', job.attempts);
+        }
     }
 }
 

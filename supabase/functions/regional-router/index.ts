@@ -9,12 +9,8 @@
  */
 
 import { serve } from 'https://deno.land/std@0.208.0/http/server.ts';
-
-interface RegionEndpoint {
-  region: string;
-  baseUrl: string;
-  priority: number;
-}
+import { SUPPORTED_REGIONS, getRegionalEndpointConfig, detectRegionFromRequest } from '../_shared/regions.ts';
+import { NoHealthyRegionsError, orderHealthyEndpoints, type RegionEndpoint } from './routing-policy.ts';
 
 interface RoutingDecision {
   targetRegion: string;
@@ -27,58 +23,12 @@ interface RoutingDecision {
  * Get regional endpoint configuration
  */
 function getRegionalEndpoints(): RegionEndpoint[] {
-  return [
-    {
-      region: 'us-east',
-      baseUrl: Deno.env.get('EDGE_FUNCTION_URL_US_EAST') || 'https://us-east.functions.supabase.co',
-      priority: 1,
-    },
-    {
-      region: 'eu-west',
-      baseUrl: Deno.env.get('EDGE_FUNCTION_URL_EU_WEST') || 'https://eu-west.functions.supabase.co',
-      priority: 1,
-    },
-    {
-      region: 'ap-southeast',
-      baseUrl: Deno.env.get('EDGE_FUNCTION_URL_AP_SOUTHEAST') || 'https://ap-southeast.functions.supabase.co',
-      priority: 1,
-    },
-  ];
+  return SUPPORTED_REGIONS.map((region) => {
+    const config = getRegionalEndpointConfig(region);
+    return { region, baseUrl: config.baseUrl, priority: 1 };
+  });
 }
 
-/**
- * Detect region from request headers
- */
-function detectRegionFromRequest(req: Request): string {
-  // Check for explicit region override
-  const regionOverride = req.headers.get('x-region-override');
-  if (regionOverride && ['us-east', 'eu-west', 'ap-southeast'].includes(regionOverride)) {
-    return regionOverride;
-  }
-
-  // Detect from country code (Cloudflare)
-  const cfCountry = req.headers.get('cf-ipcountry') || '';
-  if (cfCountry) {
-    if (['GB', 'FR', 'DE', 'IE', 'NL', 'BE', 'IT', 'ES'].includes(cfCountry)) {
-      return 'eu-west';
-    }
-    if (['SG', 'AU', 'JP', 'KR', 'IN', 'NZ', 'HK'].includes(cfCountry)) {
-      return 'ap-southeast';
-    }
-  }
-
-  // Detect from timezone
-  const tzHeader = req.headers.get('x-timezone') || '';
-  if (tzHeader.startsWith('Europe') || tzHeader.startsWith('GMT')) {
-    return 'eu-west';
-  }
-  if (tzHeader.startsWith('Asia') || tzHeader.startsWith('Australia')) {
-    return 'ap-southeast';
-  }
-
-  // Default to us-east
-  return 'us-east';
-}
 
 /**
  * Fetch health status of regions
@@ -87,6 +37,12 @@ async function getRegionHealthStatus(): Promise<Map<string, boolean>> {
   const healthMap = new Map<string, boolean>();
   const endpoints = getRegionalEndpoints();
 
+  const probeTimeoutMs = parseInt(
+    Deno.env.get('REGION_HEALTH_PROBE_TIMEOUT_MS') ?? '2000',
+    10,
+  );
+  const safeTimeout = Number.isFinite(probeTimeoutMs) && probeTimeoutMs > 0 ? probeTimeoutMs : 2000;
+
   // Check health of each region in parallel
   const healthPromises = endpoints.map(async (endpoint) => {
     try {
@@ -94,6 +50,7 @@ async function getRegionHealthStatus(): Promise<Map<string, boolean>> {
       const response = await fetch(healthCheckUrl, {
         method: 'GET',
         headers: { 'Accept': 'application/json' },
+        signal: AbortSignal.timeout(safeTimeout),
       });
 
       const data = await response.json() as { allHealthy: boolean };
@@ -124,28 +81,26 @@ async function makeRoutingDecision(
   // Get health status of regions
   const healthStatus = await getRegionHealthStatus();
 
-  // Sort endpoints by health and then by whether they match detected region
-  const sortedEndpoints = [...endpoints].sort((a, b) => {
-    const aHealthy = healthStatus.get(a.region) ?? false;
-    const bHealthy = healthStatus.get(b.region) ?? false;
-
-    // Prioritize healthy regions
-    if (aHealthy !== bHealthy) {
-      return aHealthy ? -1 : 1;
-    }
-
-    // Among healthy/unhealthy, prioritize detected region
-    const aMatches = a.region === detectedRegion ? 1 : 0;
-    const bMatches = b.region === detectedRegion ? 1 : 0;
-
-    return bMatches - aMatches;
-  });
+  const sortedEndpoints = orderHealthyEndpoints(endpoints, healthStatus, detectedRegion);
 
   const selectedEndpoint = sortedEndpoints[0];
   const reason =
     healthStatus.get(selectedEndpoint.region)
       ? `Primary region ${detectedRegion} is healthy`
       : `Primary region ${detectedRegion} is unhealthy, routing to ${selectedEndpoint.region}`;
+
+  const regionHealth: Record<string, boolean> = {};
+  for (const ep of endpoints) {
+    regionHealth[ep.region] = healthStatus.get(ep.region) ?? false;
+  }
+
+  console.log(JSON.stringify({
+    event: 'routing_decision',
+    targetRegion: selectedEndpoint.region,
+    reason,
+    regionHealth,
+    detectedRegion,
+  }));
 
   return {
     targetRegion: selectedEndpoint.region,
@@ -217,7 +172,10 @@ async function handleRouting(req: Request): Promise<Response> {
         error: 'Routing failed',
         details: String(error),
       }),
-      { status: 502, headers: { 'Content-Type': 'application/json' } }
+      {
+        status: error instanceof NoHealthyRegionsError ? 503 : 502,
+        headers: { 'Content-Type': 'application/json' },
+      }
     );
   }
 }
@@ -242,7 +200,10 @@ async function handleRoutingInfo(req: Request): Promise<Response> {
         error: 'Failed to get routing information',
         details: String(error),
       }),
-      { status: 500, headers: { 'Content-Type': 'application/json' } }
+      {
+        status: error instanceof NoHealthyRegionsError ? 503 : 500,
+        headers: { 'Content-Type': 'application/json' },
+      }
     );
   }
 }

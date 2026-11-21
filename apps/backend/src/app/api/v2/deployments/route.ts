@@ -21,10 +21,11 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
+import { DeploymentStatusType } from '@craft/types';
 import { withAuth } from '@/lib/api/with-auth';
 import { withVersion } from '@/lib/api/with-version';
 
-const VALID_STATUSES = ['pending', 'building', 'completed', 'failed'];
+const VALID_STATUSES = Object.values(DeploymentStatusType);
 const VALID_SORTS = ['created_at', 'name', 'status'];
 
 const getDeploymentsV2 = withAuth(async (req: NextRequest, { user, supabase }) => {
@@ -48,9 +49,19 @@ const getDeploymentsV2 = withAuth(async (req: NextRequest, { user, supabase }) =
             );
         }
 
+        if (!/^\d+$/.test(limitParam)) {
+            return NextResponse.json(
+                { error: 'Invalid limit parameter. Must be a positive integer.' },
+                { status: 400 },
+            );
+        }
+
         const limit = Math.min(parseInt(limitParam, 10), 100);
         if (isNaN(limit) || limit < 1) {
-            return NextResponse.json({ error: 'Invalid limit parameter' }, { status: 400 });
+            return NextResponse.json(
+                { error: 'Invalid limit parameter. Must be a positive integer.' },
+                { status: 400 },
+            );
         }
 
         let query = supabase

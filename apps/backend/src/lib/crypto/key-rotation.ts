@@ -20,6 +20,21 @@
  *   - Runs as a one-off script with direct DB access (service_role key).
  *   - Does NOT cause downtime: old and new keys coexist during rotation.
  *   - HSM / KMS integration is out of scope.
+ *
+ * Isolation guarantee for concurrent reads (#1323):
+ *   - Each encrypted value is replaced as a whole string by the batched upsert,
+ *     so a concurrent read observes either the old-key blob or the new-key
+ *     blob for a given field — never a partially-rotated or corrupted value.
+ *     Both decrypt correctly as long as the old FIELD_ENCRYPTION_KEY_<N> is
+ *     still configured (step 6 above must wait until rotation completes).
+ *   - Columns are rotated one at a time, so a read that spans both columns of
+ *     the same row may see them at different key versions mid-rotation. Each
+ *     field is still independently decryptable.
+ *   - NOT guaranteed: the rotation reads a snapshot and writes it back later,
+ *     so an application write to the same field between the select and the
+ *     upsert is overwritten by the re-encrypted snapshot value (lost update).
+ *     Run rotation when writes to these columns are quiescent.
+ *   - See key-rotation.test.ts ("reads racing an in-flight rotation").
  */
 
 import { createClient } from '@supabase/supabase-js';
@@ -71,24 +86,27 @@ export async function rotateProfileEncryptedColumns(
         if (error) throw new Error(`Failed to fetch profiles for ${col}: ${error.message}`);
         if (!rows?.length) continue;
 
-        for (const row of rows) {
-            const stored = row[col] as string;
-            summary[col].total++;
+        const updates = rows
+            .map((row) => {
+                const stored = row[col] as string;
+                summary[col].total++;
 
-            const { value, rotated } = reEncrypt(stored);
-            if (!rotated) continue;
+                const { value, rotated } = reEncrypt(stored);
+                return rotated ? { id: row.id, [col]: value } : null;
+            })
+            .filter((update): update is { id: string; [key: string]: string } => update !== null);
 
-            const { error: updateError } = await supabase
-                .from('profiles')
-                .update({ [col]: value })
-                .eq('id', row.id);
+        if (updates.length === 0) continue;
 
-            if (updateError) {
-                throw new Error(`Failed to update row ${row.id} for ${col}: ${updateError.message}`);
-            }
+        const { error: updateError } = await supabase
+            .from('profiles')
+            .upsert(updates);
 
-            summary[col].rotated++;
+        if (updateError) {
+            throw new Error(`Failed to update rows for ${col}: ${updateError.message}`);
         }
+
+        summary[col].rotated += updates.length;
     }
 
     return summary;

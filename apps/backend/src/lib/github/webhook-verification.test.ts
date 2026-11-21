@@ -12,7 +12,7 @@
  *   - Body tampering detection
  */
 
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import crypto from 'crypto';
 import {
     verifyGitHubWebhookSignature,
@@ -96,6 +96,48 @@ describe('verifyGitHubWebhookSignature', () => {
 
         const result = verifyGitHubWebhookSignature(payload, signature, WEBHOOK_SECRET);
         expect(result).toBe(true);
+    });
+
+    describe('empty secret guard', () => {
+        let consoleErrorSpy: ReturnType<typeof vi.spyOn>;
+
+        beforeEach(() => {
+            consoleErrorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        });
+
+        afterEach(() => {
+            consoleErrorSpy.mockRestore();
+        });
+
+        it('rejects a correctly computed signature when the secret is an empty string', () => {
+            const payload = '{"test": "data"}';
+            // Signature computed with a blank key — must never validate.
+            const signature = generateGitHubWebhookSignature(payload, '');
+
+            const result = verifyGitHubWebhookSignature(payload, signature, '');
+            expect(result).toBe(false);
+        });
+
+        it('rejects a correctly computed signature when the secret is undefined', () => {
+            const payload = '{"test": "data"}';
+            const signature = generateGitHubWebhookSignature(payload, '');
+
+            const result = verifyGitHubWebhookSignature(
+                payload,
+                signature,
+                undefined as unknown as string
+            );
+            expect(result).toBe(false);
+        });
+
+        it('logs an error when the secret is missing', () => {
+            const payload = '{"test": "data"}';
+            const signature = generateGitHubWebhookSignature(payload, '');
+
+            verifyGitHubWebhookSignature(payload, signature, '');
+
+            expect(consoleErrorSpy).toHaveBeenCalled();
+        });
     });
 });
 

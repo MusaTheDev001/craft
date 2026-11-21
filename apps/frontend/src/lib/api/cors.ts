@@ -17,6 +17,17 @@
  * Adding new origins:
  *   Update the ALLOWED_ORIGINS environment variable — no code change needed.
  *
+ * Vary: Origin is sent unconditionally:
+ *   Vary is emitted on every response, even when the origin is not allowed,
+ *   so shared caches (CDNs, proxies) never store a response without it and
+ *   later serve it to a different origin.  Only Access-Control-Allow-Origin
+ *   is conditional on the allow-list.
+ *
+ * Supported custom request headers:
+ *   API-Version (sent by CraftClient) and Idempotency-Key (read by the
+ *   idempotency middleware) are included in Access-Control-Allow-Headers so
+ *   browser preflights for them succeed.  No wildcard is used.
+ *
  * Webhook routes (/api/webhooks/*) are intentionally excluded from this
  * helper.  They use Stripe signature verification for security and must
  * not have permissive CORS headers applied.
@@ -25,7 +36,8 @@
 const ALWAYS_ALLOWED_DEV = 'http://localhost:3000';
 
 const ALLOWED_METHODS = 'GET, POST, PUT, PATCH, DELETE, OPTIONS';
-const ALLOWED_HEADERS = 'Content-Type, Authorization, X-Requested-With';
+const ALLOWED_HEADERS =
+    'Content-Type, Authorization, X-Requested-With, API-Version, Idempotency-Key';
 const MAX_AGE = '86400'; // 24 hours
 
 /**
@@ -51,7 +63,8 @@ export function getAllowedOrigins(): Set<string> {
 
 /**
  * Returns CORS response headers for the given request origin.
- * If the origin is not in the allow-list, Access-Control-Allow-Origin is omitted.
+ * Vary: Origin is always set so shared caches key on the origin; if the
+ * origin is not in the allow-list, Access-Control-Allow-Origin is omitted.
  */
 export function corsHeaders(origin: string | null): Record<string, string> {
     const allowed = getAllowedOrigins();
@@ -59,11 +72,11 @@ export function corsHeaders(origin: string | null): Record<string, string> {
         'Access-Control-Allow-Methods': ALLOWED_METHODS,
         'Access-Control-Allow-Headers': ALLOWED_HEADERS,
         'Access-Control-Max-Age': MAX_AGE,
+        Vary: 'Origin',
     };
 
     if (origin && allowed.has(origin)) {
         headers['Access-Control-Allow-Origin'] = origin;
-        headers['Vary'] = 'Origin';
     }
 
     return headers;

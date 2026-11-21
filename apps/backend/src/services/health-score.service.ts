@@ -58,7 +58,7 @@ export class HealthScoreService {
         let latencyScore = 100;
         if (latencyRows.length > 0) {
             const sorted = latencyRows.map((r) => r.metricValue).sort((a, b) => a - b);
-            const p95 = sorted[Math.floor(sorted.length * 0.95)];
+            const p95 = percentile(sorted, 0.95);
             if (p95 >= BAD_LATENCY_MS) {
                 latencyScore = 0;
             } else if (p95 > GOOD_LATENCY_MS) {
@@ -96,6 +96,26 @@ export class HealthScoreService {
             },
         };
     }
+}
+
+/**
+ * Nearest-rank percentile of an already-sorted ascending array.
+ *
+ * Uses the nearest-rank formula: rank = ceil(n * p), and the percentile is
+ * the value at the 1-based rank, i.e. index `ceil(n * p) - 1` in 0-based
+ * terms. The index is clamped to [0, n - 1] so that p = 0 yields the minimum
+ * and p = 1 (or any p where ceil(n * p) === n) yields the maximum.
+ *
+ * Example: for n = 20 and p = 0.95, ceil(20 * 0.95) - 1 = 18, i.e. the
+ * second-largest sample — not the maximum at index 19.
+ */
+function percentile(sorted: number[], p: number): number {
+    const n = sorted.length;
+    if (n === 0) {
+        throw new Error('percentile requires at least one sample');
+    }
+    const index = Math.min(Math.max(Math.ceil(n * p) - 1, 0), n - 1);
+    return sorted[index];
 }
 
 function round(n: number): number {

@@ -12,11 +12,17 @@ const MAX_BYTES = 2 * 1024 * 1024; // 2 MB
 const MAGIC: Array<{ mime: string; bytes: number[] }> = [
     { mime: 'image/png',  bytes: [0x89, 0x50, 0x4e, 0x47] },
     { mime: 'image/jpeg', bytes: [0xff, 0xd8, 0xff] },
-    { mime: 'image/webp', bytes: [0x52, 0x49, 0x46, 0x46] }, // RIFF header
+    // WebP: "RIFF" at offsets 0-3 and "WEBP" at offsets 8-11 (bytes 4-7 are the chunk size)
+    { mime: 'image/webp', bytes: [0x52, 0x49, 0x46, 0x46, 0x00, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50] },
 ];
 
 function matchesMagic(buf: Uint8Array, magic: number[]): boolean {
     return magic.every((b, i) => buf[i] === b);
+}
+
+// WebP requires "WEBP" at offsets 8-11 in addition to the RIFF header at 0-3.
+function isWebpContent(buf: Uint8Array): boolean {
+    return matchesMagic(buf, [0x52, 0x49, 0x46, 0x46]) && matchesMagic(buf.slice(8), [0x57, 0x45, 0x42, 0x50]);
 }
 
 function isSvgContent(buf: Uint8Array): boolean {
@@ -41,7 +47,13 @@ export function validateBrandingFile(
     }
 
     // 2. Extension allowlist
-    const ext = ('.' + filename.split('.').pop()!.toLowerCase());
+    // Use lastIndexOf so a name without a dot (e.g. "png") or with only a leading
+    // dot (e.g. ".png") is not treated as having a real extension.
+    const dotIndex = filename.lastIndexOf('.');
+    if (dotIndex <= 0) {
+        return { valid: false, error: 'File must have a valid extension.', code: 'INVALID_EXTENSION' };
+    }
+    const ext = filename.slice(dotIndex).toLowerCase();
     if (!ALLOWED_EXTENSIONS.has(ext)) {
         return { valid: false, error: `File extension "${ext}" is not allowed.`, code: 'INVALID_EXTENSION' };
     }
@@ -67,6 +79,10 @@ export function validateBrandingFile(
     if (mimeType === 'image/svg+xml') {
         if (!isSvgContent(buffer)) {
             return { valid: false, error: 'SVG file is invalid or contains unsafe content (script/event handlers).', code: 'UNSAFE_SVG' };
+        }
+    } else if (mimeType === 'image/webp') {
+        if (!isWebpContent(buffer)) {
+            return { valid: false, error: 'File content does not match the declared file type.', code: 'MAGIC_BYTES_MISMATCH' };
         }
     } else {
         const match = MAGIC.find((m) => m.mime === mimeType);

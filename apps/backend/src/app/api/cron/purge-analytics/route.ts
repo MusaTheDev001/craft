@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { analyticsService } from '@/services/analytics.service';
 import { withCronAuth } from '@/lib/api/cron-auth';
+import { getRetentionPolicyWindows, readRetentionDays, validateRetentionWindows } from '@/lib/retention-policy';
 
 /**
  * Cron: purge old deployment_analytics rows
@@ -9,14 +10,21 @@ import { withCronAuth } from '@/lib/api/cron-auth';
  * ANALYTICS_RETENTION_DAYS (default: 90). This prevents the table from
  * growing unbounded and degrading query performance over time.
  *
- * Set ANALYTICS_RETENTION_DAYS=0 to disable deletion entirely.
+ * Set ANALYTICS_RETENTION_DAYS=0 to disable deletion entirely: the route
+ * returns a no-op 200 response ({ deleted: 0, skipped: true }) without
+ * validating retention windows or deleting any rows.
  *
  * Scheduled daily via vercel.json. Protected by CRON_SECRET.
  */
 async function handleAnalyticsPurge(req: NextRequest) {
-    const retentionDays = parseInt(process.env.ANALYTICS_RETENTION_DAYS ?? '90', 10);
+    const retentionDays = readRetentionDays('analyticsPurge');
+
+    if (retentionDays === 0) {
+        return NextResponse.json({ deleted: 0, skipped: true });
+    }
 
     try {
+        validateRetentionWindows(getRetentionPolicyWindows());
         const deleted = await analyticsService.applyRetentionPolicy(retentionDays);
         return NextResponse.json({ deleted });
     } catch (error: any) {

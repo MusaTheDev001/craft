@@ -1,5 +1,13 @@
-import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
-import { checkRateLimit, getRateLimitKey, _resetStore, type RateLimitConfig } from './rate-limit';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+    checkRateLimit,
+    getRateLimitKey,
+    _resetStore,
+    _sweepStore,
+    _storeSize,
+    _resetFallbackWarning,
+    type RateLimitConfig,
+} from './rate-limit';
 
 const config: RateLimitConfig = { limit: 3, windowMs: 60_000 };
 
@@ -69,24 +77,177 @@ describe('checkRateLimit', () => {
     });
 });
 
+describe('checkRateLimit — bounded store growth (#1047)', () => {
+    beforeEach(() => _resetStore());
+    afterEach(() => vi.useRealTimers());
+
+    it('drops an entry whose timestamps are fully expired and never re-queried', () => {
+        vi.useFakeTimers();
+
+        // One-off key: a single allowed request. The entry must not linger.
+        const oneOff: RateLimitConfig = { limit: 5, windowMs: 50 };
+        checkRateLimit('one-off', oneOff);
+        expect(_storeSize()).toBe(1);
+
+        // Age past the window with no further requests on that key.
+        vi.advanceTimersByTime(oneOff.windowMs + 1);
+        _sweepStore();
+
+        expect(_storeSize()).toBe(0);
+    });
+
+    it('returns the store to a bounded size after a burst of one-off keys ages out', () => {
+        vi.useFakeTimers();
+
+        const burst: RateLimitConfig = { limit: 5, windowMs: 100 };
+        const N = 5000;
+        for (let i = 0; i < N; i++) checkRateLimit(`client-${i}`, burst);
+
+        expect(_storeSize()).toBe(N);
+
+        // All windows expire; a single sweep must reclaim every empty entry.
+        vi.advanceTimersByTime(burst.windowMs + 1);
+        _sweepStore();
+
+        expect(_storeSize()).toBe(0);
+    });
+
+    it('keeps active keys while sweeping away expired ones', () => {
+        vi.useFakeTimers();
+
+        const cfg: RateLimitConfig = { limit: 5, windowMs: 100 };
+        checkRateLimit('active', cfg); // will be refreshed below
+        checkRateLimit('stale', cfg);
+
+        vi.advanceTimersByTime(cfg.windowMs + 1);
+        // Refresh 'active' within the new window before the sweep runs.
+        checkRateLimit('active', cfg);
+        _sweepStore();
+
+        expect(_storeSize()).toBe(1);
+        expect(checkRateLimit('active', cfg).allowed).toBe(true);
+    });
+
+    it('does not shrink below the in-progress active entries on a sweep', () => {
+        const cfg: RateLimitConfig = { limit: 5, windowMs: 60_000 };
+        for (let i = 0; i < 10; i++) checkRateLimit(`keep-${i}`, cfg);
+        expect(_storeSize()).toBe(10);
+        _sweepStore();
+        expect(_storeSize()).toBe(10);
+    });
+});
+
 describe('getRateLimitKey', () => {
     const makeReq = (headers: Record<string, string | null>) => ({
         headers: { get: (name: string) => headers[name] ?? null },
     });
 
-    it('uses x-forwarded-for first', () => {
-        const req = makeReq({ 'x-forwarded-for': '1.2.3.4, 5.6.7.8' });
-        expect(getRateLimitKey(req, 'auth:signin')).toBe('auth:signin:1.2.3.4');
+    const originalHops = process.env.RATE_LIMIT_TRUSTED_PROXY_HOPS;
+
+    beforeEach(() => {
+        _resetStore();
+        _resetFallbackWarning();
+        delete process.env.RATE_LIMIT_TRUSTED_PROXY_HOPS;
     });
 
-    it('falls back to x-real-ip', () => {
+    afterEach(() => {
+        if (originalHops === undefined) {
+            delete process.env.RATE_LIMIT_TRUSTED_PROXY_HOPS;
+        } else {
+            process.env.RATE_LIMIT_TRUSTED_PROXY_HOPS = originalHops;
+        }
+        vi.restoreAllMocks();
+    });
+
+    it('uses the trusted (rightmost) x-forwarded-for entry, not the client-supplied first one', () => {
+        const req = makeReq({ 'x-forwarded-for': '1.2.3.4, 5.6.7.8' });
+        expect(getRateLimitKey(req, 'auth:signin')).toBe('auth:signin:5.6.7.8');
+    });
+
+    it('shares one bucket for different spoofed leading entries with the same trailing proxy entry', () => {
+        const spoofedA = makeReq({ 'x-forwarded-for': '6.6.6.6, 203.0.113.7' });
+        const spoofedB = makeReq({ 'x-forwarded-for': '7.7.7.7, 203.0.113.7' });
+
+        const keyA = getRateLimitKey(spoofedA, 'auth:signin');
+        const keyB = getRateLimitKey(spoofedB, 'auth:signin');
+        expect(keyA).toBe(keyB);
+        expect(keyA).toBe('auth:signin:203.0.113.7');
+
+        // Both requests land in the same bucket.
+        const cfg: RateLimitConfig = { limit: 1, windowMs: 60_000 };
+        expect(checkRateLimit(keyA, cfg).allowed).toBe(true);
+        expect(checkRateLimit(keyB, cfg).allowed).toBe(false);
+    });
+
+    it('honours RATE_LIMIT_TRUSTED_PROXY_HOPS when picking the entry from the right', () => {
+        process.env.RATE_LIMIT_TRUSTED_PROXY_HOPS = '2';
+        const req = makeReq({ 'x-forwarded-for': '6.6.6.6, 203.0.113.7, 198.51.100.9' });
+        expect(getRateLimitKey(req, 'auth:signin')).toBe('auth:signin:203.0.113.7');
+    });
+
+    it('falls back to x-real-ip when x-forwarded-for has too few entries for the configured hops', () => {
+        process.env.RATE_LIMIT_TRUSTED_PROXY_HOPS = '3';
+        const req = makeReq({ 'x-forwarded-for': '1.2.3.4', 'x-real-ip': '9.9.9.9' });
+        expect(getRateLimitKey(req, 'auth:signin')).toBe('auth:signin:9.9.9.9');
+    });
+
+    it('falls back to x-real-ip when x-forwarded-for is absent', () => {
         const req = makeReq({ 'x-forwarded-for': null, 'x-real-ip': '9.9.9.9' });
         expect(getRateLimitKey(req, 'auth:signin')).toBe('auth:signin:9.9.9.9');
     });
 
-    it('falls back to "unknown" when no IP header present', () => {
+    it('derives a per-client fallback key from user-agent and accept-language when no IP header is present', () => {
+        const reqA = makeReq({
+            'x-forwarded-for': null,
+            'x-real-ip': null,
+            'user-agent': 'AgentA',
+            'accept-language': 'en-US',
+        });
+        const reqB = makeReq({
+            'x-forwarded-for': null,
+            'x-real-ip': null,
+            'user-agent': 'AgentB',
+            'accept-language': 'fr-FR',
+        });
+
+        const keyA = getRateLimitKey(reqA, 'auth:signin');
+        const keyB = getRateLimitKey(reqB, 'auth:signin');
+
+        expect(keyA).not.toBe('auth:signin:unknown');
+        expect(keyA).not.toBe(keyB);
+        expect(keyA.startsWith('auth:signin:')).toBe(true);
+        expect(keyB.startsWith('auth:signin:')).toBe(true);
+    });
+
+    it('produces a stable fallback key for identical header-less clients', () => {
+        const make = () =>
+            makeReq({
+                'x-forwarded-for': null,
+                'x-real-ip': null,
+                'user-agent': 'SameAgent',
+                'accept-language': 'en-US',
+            });
+        expect(getRateLimitKey(make(), 'auth:signin')).toBe(getRateLimitKey(make(), 'auth:signin'));
+    });
+
+    it('logs the fallback warning exactly once across repeated header-less requests', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
         const req = makeReq({ 'x-forwarded-for': null, 'x-real-ip': null });
-        expect(getRateLimitKey(req, 'auth:signin')).toBe('auth:signin:unknown');
+        getRateLimitKey(req, 'auth:signin');
+        getRateLimitKey(req, 'auth:signin');
+        getRateLimitKey(req, 'auth:signup');
+
+        expect(warn).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not log the fallback warning when a real IP is available', () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+        getRateLimitKey(makeReq({ 'x-forwarded-for': '1.1.1.1' }), 'auth:signin');
+        getRateLimitKey(makeReq({ 'x-forwarded-for': null, 'x-real-ip': '9.9.9.9' }), 'auth:signin');
+
+        expect(warn).not.toHaveBeenCalled();
     });
 
     it('scopes key by route', () => {
