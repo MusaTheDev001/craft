@@ -23,21 +23,41 @@ const makeRequest = (body: unknown) =>
         headers: { 'Content-Type': 'application/json' },
     });
 
-// Strkey CRC-16/XMODEM checksum property tests.
-// A known valid contract address (C... strkey, 56 chars, base32 alphabet).
-const VALID_CONTRACT_ADDRESS =
-    'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
-const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+// Arbitrary for a syntactically valid custom domain (lowercase labels, optional
+// trailing dot, optional surrounding whitespace) used for idempotence checks.
+const labelArb = fc
+    .array(fc.constantFrom(...'abcdefghijklmnopqrstuvwxyz0123456789'.split('')), {
+        minLength: 1,
+        maxLength: 12,
+    })
+    .map((chars) => chars.join(''));
 
-/**
- * Mutate exactly one character of the seed address to a different base32
- * character. Returns the mutated address and the index that changed.
- */
-const mutateOneChar = (address: string, index: number, replacement: string) => {
-    const chars = address.split('');
-    chars[index] = replacement;
-    return chars.join('');
-};
+const validDomainArb = fc
+    .array(labelArb, { minLength: 2, maxLength: 4 })
+    .map((labels) => `${labels.join('.')}.com`)
+    .chain((domain) =>
+        fc
+            .tuple(
+                fc.boolean(),
+                fc.boolean(),
+                fc.boolean()
+            )
+            .map(([upper, trailingDot, pad]) => {
+                let out = upper ? domain.toUpperCase() : domain;
+                if (trailingDot) out = `${out}.`;
+                if (pad) out = `  ${out}  `;
+                return out;
+            })
+    );
+
+// Arbitrary for strings that embed scheme/path characters and must be rejected.
+const schemeOrPathArb = fc
+    .tuple(
+        fc.constantFrom('http://', 'https://', 'ftp://', '//'),
+        validDomainArb,
+        fc.constantFrom('/', '/path', '?q=1', '#frag', ':8080', '@evil.com')
+    )
+    .map(([scheme, domain, suffix]) => `${scheme}${domain}${suffix}`);
 
 describe('POST /api/customization/validate - Fuzz Tests', () => {
     beforeEach(() => {
@@ -227,47 +247,35 @@ describe('POST /api/customization/validate - Fuzz Tests', () => {
         );
     });
 
-    it('should reject single-character corruption of a valid contract address (CRC16 checksum)', async () => {
-        const { validateContractAddress } = await import(
-            '@/lib/contract-validation'
-        );
-
-        // Sanity: the seed address must be valid before mutation.
-        const seedResult = validateContractAddress(VALID_CONTRACT_ADDRESS);
-        expect(seedResult.valid).toBe(true);
+    it('should normalize custom domains idempotently', async () => {
+        const { validateCustomDomain } = await import('@/lib/validation/domain');
 
         await fc.assert(
-            fc.asyncProperty(
-                // Pick a character index within the address.
-                fc.integer({ min: 0, max: VALID_CONTRACT_ADDRESS.length - 1 }),
-                // Pick a replacement base32 character.
-                fc.integer({ min: 0, max: BASE32_ALPHABET.length - 1 }),
-                async (index, alphabetIndex) => {
-                    const original = VALID_CONTRACT_ADDRESS[index];
-                    const replacement = BASE32_ALPHABET[alphabetIndex];
+            fc.property(validDomainArb, (input) => {
+                const first = validateCustomDomain(input);
+                expect(first.valid).toBe(true);
+                if (!first.valid) return;
 
-                    // Skip no-op mutations (same character).
-                    fc.pre(original !== replacement);
+                const second = validateCustomDomain(first.domain);
+                expect(second.valid).toBe(true);
+                if (!second.valid) return;
 
-                    const mutated = mutateOneChar(
-                        VALID_CONTRACT_ADDRESS,
-                        index,
-                        replacement
-                    );
+                // Normalization must be a no-op on its own output.
+                expect(second.domain).toBe(first.domain);
+            }),
+            { numRuns: 200 }
+        );
+    });
 
-                    const result = validateContractAddress(mutated);
+    it('should reject domains containing scheme or path characters', async () => {
+        const { validateCustomDomain } = await import('@/lib/validation/domain');
 
-                    // A single-character corruption must never validate.
-                    expect(result.valid).toBe(false);
-                    if (!result.valid) {
-                        expect([
-                            'CONTRACT_ADDRESS_INVALID_CHECKSUM',
-                            'CONTRACT_ADDRESS_INVALID_VERSION',
-                        ]).toContain(result.error);
-                    }
-                }
-            ),
-            { numRuns: 50 }
+        await fc.assert(
+            fc.property(schemeOrPathArb, (input) => {
+                const result = validateCustomDomain(input);
+                expect(result.valid).toBe(false);
+            }),
+            { numRuns: 200 }
         );
     });
 

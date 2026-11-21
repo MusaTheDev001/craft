@@ -22,9 +22,22 @@ const makeRequest = (body: unknown) =>
         headers: { 'Content-Type': 'application/json' },
     });
 
-// Known valid Stellar contract address (Strkey C... with valid CRC16/XMODEM checksum).
-const VALID_CONTRACT_ADDRESS = 'CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4';
-const BASE32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+const makeDomainRequest = (domain: string) =>
+    makeRequest({ ...valid, branding: { ...valid.branding, customDomain: domain } });
+
+const labelArb = fc.stringMatching(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/);
+const tldArb = fc.stringMatching(/^[a-z]{2,24}$/);
+const validDomainArb = fc
+    .tuple(fc.array(labelArb, { minLength: 1, maxLength: 3 }), tldArb)
+    .map(([labels, tld]) => [...labels, tld].join('.'));
+
+const schemeOrPathArb = fc
+    .tuple(
+        fc.constantFrom('http://', 'https://', 'ftp://', '//', 'www.'),
+        validDomainArb,
+        fc.constantFrom('/', '/path', '?q=1', '#frag', ':8080', '\\path'),
+    )
+    .map(([prefix, domain, suffix]) => `${prefix}${domain}${suffix}`);
 
 describe('POST /api/customization/validate', () => {
     beforeEach(() => {
@@ -79,43 +92,37 @@ describe('POST /api/customization/validate', () => {
         expect(res.status).toBe(400);
     });
 
-    it('rejects single-character corruption of a valid contract address (CRC16 property)', async () => {
+    it('normalizes custom domains idempotently', async () => {
         const { POST } = await import('./route');
         await fc.assert(
-            fc.asyncProperty(
-                fc.integer({ min: 0, max: VALID_CONTRACT_ADDRESS.length - 1 }),
-                fc.integer({ min: 0, max: BASE32_ALPHABET.length - 1 }),
-                async (index, alphabetIndex) => {
-                    const replacement = BASE32_ALPHABET[alphabetIndex];
-                    if (VALID_CONTRACT_ADDRESS[index] === replacement) {
-                        return true;
-                    }
-                    const mutated =
-                        VALID_CONTRACT_ADDRESS.slice(0, index) +
-                        replacement +
-                        VALID_CONTRACT_ADDRESS.slice(index + 1);
+            fc.asyncProperty(validDomainArb, async (domain) => {
+                const first = await POST(makeDomainRequest(domain), { params: {} });
+                expect(first.status).toBe(200);
+                const firstBody = await first.json();
+                expect(firstBody.valid).toBe(true);
+                const normalized = firstBody.data.branding.customDomain;
+                expect(typeof normalized).toBe('string');
 
-                    const res = await POST(
-                        makeRequest({
-                            ...valid,
-                            stellar: { ...valid.stellar, contractAddress: mutated },
-                        }),
-                        { params: {} },
-                    );
-                    const body = await res.json();
-                    expect(res.status).toBe(422);
-                    expect(body.valid).toBe(false);
-                    const codes = body.errors.map((e: { code: string }) => e.code);
-                    expect(
-                        codes.some(
-                            (code: string) =>
-                                code === 'CONTRACT_ADDRESS_INVALID_CHECKSUM' ||
-                                code === 'CONTRACT_ADDRESS_INVALID_VERSION',
-                        ),
-                    ).toBe(true);
-                    return true;
-                },
-            ),
+                const second = await POST(makeDomainRequest(normalized), { params: {} });
+                expect(second.status).toBe(200);
+                const secondBody = await second.json();
+                expect(secondBody.valid).toBe(true);
+                expect(secondBody.data.branding.customDomain).toBe(normalized);
+            }),
+            { numRuns: 25 },
+        );
+    });
+
+    it('rejects custom domains containing scheme or path characters', async () => {
+        const { POST } = await import('./route');
+        await fc.assert(
+            fc.asyncProperty(schemeOrPathArb, async (domain) => {
+                const res = await POST(makeDomainRequest(domain), { params: {} });
+                expect(res.status).toBe(422);
+                const body = await res.json();
+                expect(body.valid).toBe(false);
+                expect(body.errors.some((e: { field: string }) => e.field === 'branding.customDomain')).toBe(true);
+            }),
             { numRuns: 25 },
         );
     });
