@@ -13,9 +13,9 @@ Comprehensive documentation for the CRAFT platform.
 
 - [App Shell Components](./components/app-shell-components.md) - Technical specifications for shell components
 
-### Operations
+### Soroban
 
-- [Cron Authentication](./cron-authentication.md) - Cron route authentication and `CRON_SECRET` rotation
+- [Contract Address Validation](./soroban-contract-address-validation.md) - Validation rules, error codes, and SEP-0023 encoding
 
 ### Getting Started
 

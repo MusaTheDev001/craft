@@ -1,72 +1,87 @@
-/**
- * Contract address validation utilities for Soroban.
- */
+import { StrKey } from '@stellar/stellar-sdk';
 
-export type ContractValidationErrorCode =
-  | 'CONTRACT_ADDRESS_REQUIRED'
-  | 'CONTRACT_ADDRESS_INVALID_TYPE'
-  | 'CONTRACT_ADDRESS_WHITESPACE'
-  | 'CONTRACT_ADDRESS_INVALID_LENGTH'
-  | 'CONTRACT_ADDRESS_INVALID_FORMAT';
+export type ContractAddressErrorCode =
+  | 'WHITESPACE'
+  | 'EMPTY'
+  | 'LENGTH'
+  | 'PREFIX'
+  | 'CHARSET'
+  | 'CHECKSUM'
+  | 'VERSION_BYTE';
 
-export interface ContractValidationResult {
-  valid: boolean;
-  code?: ContractValidationErrorCode;
-  message?: string;
-}
+export type ContractAddressValidationResult =
+  | { valid: true; address: string }
+  | { valid: false; code: ContractAddressErrorCode; message: string };
 
 const CONTRACT_ADDRESS_LENGTH = 56;
-const CONTRACT_ADDRESS_REGEX = /^C[A-Z2-7]{55}$/;
+const CONTRACT_ADDRESS_PREFIX = 'C';
+const BASE32_CHARSET = /^[A-Z2-7]+$/;
 
 /**
- * Validates a Soroban contract address.
+ * Validates a Soroban contract address (StrKey `C...`).
  *
- * The input is treated as untrusted (e.g. parsed from user JSON), so the
- * runtime type is checked before any string operations are performed.
- *
- * @param address - Untrusted contract address value of unknown type.
- * @returns A validation result describing whether the address is valid.
+ * Checks are ordered and strict; the first failing check determines the
+ * returned error code.
  */
-export function validateContractAddress(address: unknown): ContractValidationResult {
-  if (typeof address !== 'string') {
+export function validateContractAddress(
+  input: unknown,
+): ContractAddressValidationResult {
+  if (typeof input !== 'string') {
+    return { valid: false, code: 'EMPTY', message: 'Address must be a string' };
+  }
+
+  if (/\s/.test(input)) {
     return {
       valid: false,
-      code: 'CONTRACT_ADDRESS_INVALID_TYPE',
-      message: `Contract address must be a string, got ${address === null ? 'null' : typeof address}`,
+      code: 'WHITESPACE',
+      message: 'Address must not contain whitespace',
     };
   }
 
-  if (address.length === 0) {
+  if (input.length === 0) {
+    return { valid: false, code: 'EMPTY', message: 'Address must not be empty' };
+  }
+
+  if (input.length !== CONTRACT_ADDRESS_LENGTH) {
     return {
       valid: false,
-      code: 'CONTRACT_ADDRESS_REQUIRED',
-      message: 'Contract address is required',
+      code: 'LENGTH',
+      message: `Address must be ${CONTRACT_ADDRESS_LENGTH} characters`,
     };
   }
 
-  if (/\s/.test(address)) {
+  if (!input.startsWith(CONTRACT_ADDRESS_PREFIX)) {
     return {
       valid: false,
-      code: 'CONTRACT_ADDRESS_WHITESPACE',
-      message: 'Contract address must not contain whitespace',
+      code: 'PREFIX',
+      message: `Address must start with '${CONTRACT_ADDRESS_PREFIX}'`,
     };
   }
 
-  if (address.length !== CONTRACT_ADDRESS_LENGTH) {
+  if (!BASE32_CHARSET.test(input)) {
     return {
       valid: false,
-      code: 'CONTRACT_ADDRESS_INVALID_LENGTH',
-      message: `Contract address must be ${CONTRACT_ADDRESS_LENGTH} characters, got ${address.length}`,
+      code: 'CHARSET',
+      message: 'Address must be valid base32 (A-Z, 2-7)',
     };
   }
 
-  if (!CONTRACT_ADDRESS_REGEX.test(address)) {
+  if (!StrKey.isValidContract(input)) {
     return {
       valid: false,
-      code: 'CONTRACT_ADDRESS_INVALID_FORMAT',
-      message: 'Contract address must start with "C" and contain only base32 characters',
+      code: 'CHECKSUM',
+      message: 'Address checksum is invalid',
     };
   }
 
-  return { valid: true };
+  const versionByte = StrKey.decodeContract(input)[0];
+  if (versionByte !== StrKey.getVersionByteForPrefix('C')) {
+    return {
+      valid: false,
+      code: 'VERSION_BYTE',
+      message: 'Address version byte is invalid',
+    };
+  }
+
+  return { valid: true, address: input };
 }
