@@ -13,6 +13,10 @@ Comprehensive documentation for the CRAFT platform.
 
 - [App Shell Components](./components/app-shell-components.md) - Technical specifications for shell components
 
+### Operations
+
+- [Cron Authentication](./cron-authentication.md) - Cron route authentication and `CRON_SECRET` rotation
+
 ### Getting Started
 
 - [Development Setup](#development-setup)
@@ -76,7 +80,22 @@ GITHUB_API_BASE_URL=https://api.github.com
 #   Generate with: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
 STRIPE_SECRET_KEY=your_stripe_key
 STRIPE_WEBHOOK_SECRET=your_webhook_secret
+# Artifact signing
+# ARTIFACT_SIGNING_SECRET is the current secret used to sign deployment artifacts.
+# ARTIFACT_SIGNING_SECRET_PREVIOUS is the previous secret retained only during rotation.
+ARTIFACT_SIGNING_SECRET=your_artifact_signing_secret
+ARTIFACT_SIGNING_SECRET_PREVIOUS=your_previous_artifact_signing_secret
+# DEPLOYMENT_ARTIFACT_BUCKET is the storage bucket for signed artifacts.
+# Defaults to 'craft-deployment-artifacts' if not overridden.
+DEPLOYMENT_ARTIFACT_BUCKET=craft-deployment-artifacts
 
+# Email (transactional email provider - e.g., Resend, SendGrid)
+# When EMAIL_API_URL is unset, emails are logged to console instead of sent (dev mode)
+EMAIL_API_URL=https://api.resend.com
+EMAIL_API_KEY=your_email_api_key
+EMAIL_FROM=notifications@craft.app
+# EMAIL_WEBHOOK_SECRET must be a random string for webhook signature verification
+EMAIL_WEBHOOK_SECRET=your_random_webhook_secret
 # Cron & Admin
 # Secret used to authenticate cron route calls. Required in production.
 # Generate a random secret with: openssl rand -hex 32
@@ -86,7 +105,16 @@ CRON_SECRET=your_cron_secret
 ADMIN_USER_IDS=
 ```
 
+# Compliance
+# JSON configuration for asset compliance checks.
+# Provide a blocklist of issuer accounts and jurisdiction rules.
+# When unset, compliance checks are disabled (no warnings).
+COMPLIANCE_BLOCKLIST_JSON='[{"issuer":"GAAAAAAA...","reason":"Example blocked issuer"}]'
+COMPLIANCE_JURISDICTION_JSON='[{"jurisdiction":"US","blockedAssets":["TOKEN"]}]'
+# See docs/asset-validation-rules.md for details.
+
 See [RBAC & Admin Middleware](./rbac-admin-middleware.md) for details on admin role resolution.
+See [Cron Authentication](./cron-authentication.md) for how cron routes are authenticated and how to rotate `CRON_SECRET`.
 
 ---
 
@@ -309,161 +337,4 @@ Implementation notes:
 - Supports both first-time branch creation (from `baseBranch`) and updates to existing branches
 - Creates blobs in bounded batches for large generated file sets
 - Validates paths to prevent unsafe writes (`..`, absolute paths, `.git`)
-- Enforces file-count and total-byte limits for safety under large workspaces
-- Returns commit references (`commitSha`, `treeSha`, `commitUrl`, `previousCommitSha`) for auditability
-
-Error model:
-- `AUTH_ERROR` for invalid/expired GitHub credentials
-- `VALIDATION_ERROR` for malformed requests or unsafe generated files
-- `NETWORK_ERROR` for transport failures to GitHub
-- `API_ERROR` for non-auth GitHub API failures
-
-### Blue-Green Deployment Updates
-
-Live deployment updates now use a staged rollout instead of a hard cutover when the deployment already has a Vercel project binding.
-
-Behavior:
-- The update pipeline deploys the new revision to the standby environment first.
-- Canary rollout state is tracked on the `deployment_updates.canary_percent` field for observability.
-- Promotion reassigns the active Vercel aliases only after the rollout checks pass.
-- If candidate health degrades or an operator requests rollback during rollout, traffic stays on the previous active deployment.
-- If a Vercel alias reassignment fails mid-switch, the service automatically reassigns any moved aliases back to the previous deployment before surfacing the error.
-
-Sequence diagram:
-
-```text
-deployment update
-  -> standby deploy
-  -> canary traffic (5% -> 25% -> 50%)
-  -> monitor candidate health
-  -> promote active aliases
-  -> 100% traffic on candidate
-
-deployment update
-  -> standby deploy
-  -> canary traffic
-  -> monitor detects failure or manual rollback
-  -> keep active aliases on stable deployment
-  -> mark update rolled_back
-```
-
-### Payment Endpoints
-
-```
-POST /api/payments/checkout     - Create checkout session
-GET  /api/payments/subscription - Get subscription status
-POST /api/payments/cancel       - Cancel subscription
-POST /api/webhooks/stripe       - Stripe webhook handler
-```
-
----
-
-## Deployment
-
-### Production Build
-
-```bash
-# Build application
-npm run build
-
-# Start production server
-npm start
-```
-
-### Environment Configuration
-
-- Development: `.env.local`
-- Staging: `.env.staging`
-- Production: `.env.production`
-
-### Deployment Checklist
-
-- [ ] Run tests
-- [ ] Build succeeds
-- [ ] Environment variables set
-- [ ] Database migrations applied
-- [ ] API keys configured
-- [ ] Monitoring enabled
-
----
-
-## Troubleshooting
-
-### Common Issues
-
-**Build Fails**
-
-```bash
-# Clear cache and reinstall
-rm -rf node_modules .next
-npm install
-npm run build
-```
-
-**Tests Fail**
-
-```bash
-# Update snapshots
-npm test -- -u
-
-# Clear test cache
-npm test -- --clearCache
-```
-
-**Type Errors**
-
-```bash
-# Regenerate types
-npm run generate:types
-```
-
----
-
-## Resources
-
-### External Documentation
-
-- [Next.js Docs](https://nextjs.org/docs)
-- [Tailwind CSS](https://tailwindcss.com/docs)
-- [Supabase](https://supabase.com/docs)
-- [Stripe](https://stripe.com/docs)
-- [Stellar](https://developers.stellar.org/)
-
-### Internal Links
-
-- [Design System](../Design/DESIGN.md)
-- [API Routes](./api/README.md)
-- [Component Library](./components/README.md)
-
----
-
-## Support
-
-### Getting Help
-
-- Check documentation first
-- Search existing issues
-- Ask in team chat
-- Create new issue if needed
-
-### Reporting Bugs
-
-Include:
-
-- Steps to reproduce
-- Expected behavior
-- Actual behavior
-- Screenshots if applicable
-- Environment details
-
----
-
-## License
-
-[License information]
-
----
-
-## Changelog
-
-See [CHANGELOG.md](../CHANGELOG.md) for version history.
+- Enforces file-count and total-byte limits for

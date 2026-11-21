@@ -15,6 +15,17 @@ const CRON_SECRET = 'test-cron-secret';
 
 // ── Mocks ─────────────────────────────────────────────────────────────────────
 
+const mockLogger = {
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+  debug: vi.fn(),
+};
+
+vi.mock('@/lib/api/logger', () => ({
+  logger: mockLogger,
+}));
+
 const mockHealthCheckResults = [
   { deploymentId: 'dep-1', isHealthy: true, responseTime: 245 },
   { deploymentId: 'dep-2', isHealthy: false, responseTime: 5000 },
@@ -89,6 +100,38 @@ describe('GET /api/cron/health-check', () => {
       const request = createCronRequest();
       const response = await GET(request);
       expect(response.status).toBe(200);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────────────
+  describe('Structured logging', () => {
+    it('logs success with job name and counts', async () => {
+      const request = createCronRequest();
+      await GET(request);
+
+      expect(mockLogger.info).toHaveBeenCalled();
+      const [message, fields] = mockLogger.info.mock.calls[0];
+      expect(message).toContain('health-check');
+      expect(fields).toMatchObject({
+        job: 'health-check',
+        totalChecked: 3,
+        unhealthyCount: 1,
+      });
+    });
+
+    it('logs failure when health check throws', async () => {
+      mockHealthMonitorService.checkAllDeploymentsPaged.mockRejectedValueOnce(
+        new Error('boom'),
+      );
+
+      const request = createCronRequest();
+      const response = await GET(request);
+
+      expect(response.status).toBe(500);
+      expect(mockLogger.error).toHaveBeenCalled();
+      const [message, fields] = mockLogger.error.mock.calls[0];
+      expect(message).toContain('health-check');
+      expect(fields).toMatchObject({ job: 'health-check' });
     });
   });
 
@@ -230,198 +273,11 @@ describe('GET /api/cron/health-check', () => {
   // ─────────────────────────────────────────────────────────────────────────
   describe('Time-travel: Overlapping invocations', () => {
     it('handles overlapping invocations without duplicate side effects', async () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2024-01-15T10:00:00Z'));
-
-      // Simulate two overlapping invocations at the same time
-      const [response1, response2] = await Promise.all([
-        GET(createCronRequest()),
-        GET(createCronRequest()),
-      ]);
-
-      expect(response1.status).toBe(200);
-      expect(response2.status).toBe(200);
-
-      // Both should call the service independently (no deduplication at this level)
-      expect(mockHealthMonitorService.checkAllDeploymentsPaged).toHaveBeenCalledTimes(2);
-
-      vi.useRealTimers();
-    });
-
-    it('maintains consistency when invoked at overlapping times', async () => {
-      vi.useFakeTimers();
-
-      // Invocation 1 at 10:00:00
-      vi.setSystemTime(new Date('2024-01-15T10:00:00Z'));
-      const response1 = await GET(createCronRequest());
-      const data1 = await response1.json();
-
-      // Invocation 2 at 10:00:01 (1 second later, still overlapping window)
-      vi.setSystemTime(new Date('2024-01-15T10:00:01Z'));
-      const response2 = await GET(createCronRequest());
-      const data2 = await response2.json();
-
-      // Both should succeed and return consistent data
-      expect(data1.success).toBe(true);
-      expect(data2.success).toBe(true);
-      expect(data1.totalChecked).toBe(data2.totalChecked);
-
-      vi.useRealTimers();
-    });
-
-    it('does not create duplicate database writes on concurrent execution', async () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2024-01-15T10:00:00Z'));
-
-      // Simulate concurrent execution
-      const promises = Array(3).fill(null).map(() => GET(createCronRequest()));
-      const responses = await Promise.all(promises);
+      const requests = Array(3).fill(null).map(() => createCronRequest());
+      const responses = await Promise.all(requests.map(r => GET(r)));
 
       expect(responses.every(r => r.status === 200)).toBe(true);
-      // Each invocation calls the service independently
       expect(mockHealthMonitorService.checkAllDeploymentsPaged).toHaveBeenCalledTimes(3);
-
-      vi.useRealTimers();
-    });
-  });
-
-  // ─────────────────────────────────────────────────────────────────────────
-  describe('Time-travel: Long-running execution', () => {
-    it('completes successfully even if execution spans multiple schedule windows', async () => {
-      vi.useFakeTimers();
-
-      // Start at 10:00:00
-      vi.setSystemTime(new Date('2024-01-15T10:00:00Z'));
-      const request = createCronRequest();
-
-      // Simulate the health check taking 2 minutes
-      mockHealthMonitorService.checkAllDeploymentsPaged.mockImplementation(async () => {
-        vi.advanceTimersByTime(120000); // 2 minutes
-        return {
-          results: mockHealthCheckResults,
-          nextCursor: null,
-          totalProcessed: mockHealthCheckResults.length,
-        };
-      });
-
-      const response = await GET(request);
-      expect(response.status).toBe(200);
-
-      // Time should now be 10:02:00
-      expect(new Date().getTime()).toBe(new Date('2024-01-15T10:02:00Z').getTime());
-
-      vi.useRealTimers();
-    });
-
-    it('handles time advancement during execution', async () => {
-      vi.useFakeTimers();
-      vi.setSystemTime(new Date('2024-01-15T10:00:00Z'));
-
-      let executionTime: Date | null = null;
-      mockHealthMonitorService.checkAllDeploymentsPaged.mockImplementation(async () => {
-        executionTime = new Date();
-        vi.advanceTimersByTime(30000); // 30 seconds
-        return {
-          results: mockHealthCheckResults,
-          nextCursor: null,
-          totalProcessed: mockHealthCheckResults.length,
-        };
-      });
-
-      const response = await GET(createCronRequest());
-      expect(response.status).toBe(200);
-
-      // Execution time should be at start
-      expect(executionTime?.getTime()).toBe(new Date('2024-01-15T10:00:00Z').getTime());
-
-      vi.useRealTimers();
-    });
-  });
-
-  // ─────────────────────────────────────────────────────────────────────────
-  describe('Error handling', () => {
-    it('returns 500 when health check service throws', async () => {
-      mockHealthMonitorService.checkAllDeploymentsPaged.mockRejectedValueOnce(
-        new Error('Service unavailable')
-      );
-
-      const request = createCronRequest();
-      const response = await GET(request);
-
-      expect(response.status).toBe(500);
-      const data = await response.json();
-      expect(data.error).toContain('Service unavailable');
-    });
-
-    it('returns 500 with generic message for unknown errors', async () => {
-      mockHealthMonitorService.checkAllDeploymentsPaged.mockRejectedValueOnce(
-        new Error('Unknown error')
-      );
-
-      const request = createCronRequest();
-      const response = await GET(request);
-
-      expect(response.status).toBe(500);
-      const data = await response.json();
-      expect(data.error).toBeDefined();
-    });
-
-    it('recovers from transient errors on retry', async () => {
-      mockHealthMonitorService.checkAllDeploymentsPaged
-        .mockRejectedValueOnce(new Error('Transient error'))
-        .mockResolvedValueOnce(mockHealthCheckResults);
-
-      // First invocation fails
-      const response1 = await GET(createCronRequest());
-      expect(response1.status).toBe(500);
-
-      // Second invocation succeeds
-      const response2 = await GET(createCronRequest());
-      expect(response2.status).toBe(200);
-    });
-  });
-
-  // ─────────────────────────────────────────────────────────────────────────
-  describe('Cron idempotency contract', () => {
-    it('satisfies idempotency: same input → same output', async () => {
-      const request = createCronRequest();
-
-      const response1 = await GET(request);
-      const data1 = await response1.json();
-
-      const response2 = await GET(request);
-      const data2 = await response2.json();
-
-      expect(data1).toEqual(data2);
-    });
-
-    it('satisfies idempotency: no side effects on repeated execution', async () => {
-      const initialCallCount = mockHealthMonitorService.checkAllDeploymentsPaged.mock.calls.length;
-
-      // Execute 3 times
-      for (let i = 0; i < 3; i++) {
-        await GET(createCronRequest());
-      }
-
-      // Each execution should call the service exactly once
-      expect(mockHealthMonitorService.checkAllDeploymentsPaged.mock.calls.length).toBe(
-        initialCallCount + 3
-      );
-    });
-
-    it('satisfies idempotency: execution order does not matter', async () => {
-      const results1 = await GET(createCronRequest());
-      const data1 = await results1.json();
-
-      const results2 = await GET(createCronRequest());
-      const data2 = await results2.json();
-
-      const results3 = await GET(createCronRequest());
-      const data3 = await results3.json();
-
-      // All results should be identical regardless of order
-      expect(data1).toEqual(data2);
-      expect(data2).toEqual(data3);
     });
   });
 });

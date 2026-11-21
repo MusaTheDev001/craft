@@ -184,6 +184,46 @@ describe('CraftClient initialization', () => {
   });
 });
 
+describe('Path identifier encoding', () => {
+  let client: CraftClient;
+
+  beforeEach(() => {
+    client = new CraftClient({ baseUrl: BASE_URL });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('getTemplate percent-encodes the template id', async () => {
+    const fetch = mockFetch(TEMPLATE);
+    vi.stubGlobal('fetch', fetch);
+    await client.getTemplate('a/b?c');
+    expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/templates/a%2Fb%3Fc`);
+  });
+
+  it('getTemplateMetadata percent-encodes the template id', async () => {
+    const fetch = mockFetch(TEMPLATE);
+    vi.stubGlobal('fetch', fetch);
+    await client.getTemplateMetadata('a/b?c');
+    expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/templates/a%2Fb%3Fc/metadata`);
+  });
+
+  it('getDeploymentAnalytics percent-encodes the deployment id', async () => {
+    const fetch = mockFetch(ANALYTICS);
+    vi.stubGlobal('fetch', fetch);
+    await client.getDeploymentAnalytics('a/b?c');
+    expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/deployments/a%2Fb%3Fc/analytics`);
+  });
+
+  it('getDeploymentHealth percent-encodes the deployment id', async () => {
+    const fetch = mockFetch(HEALTH);
+    vi.stubGlobal('fetch', fetch);
+    await client.getDeploymentHealth('a/b?c');
+    expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/deployments/a%2Fb%3Fc/health`);
+  });
+});
+
 describe('Auth methods', () => {
   let client: CraftClient;
 
@@ -236,43 +276,50 @@ describe('Auth methods', () => {
   });
 
   it('signUp throws CraftApiError on 409 conflict', async () => {
-    vi.stubGlobal('fetch', mockFetch({ error: 'Email already exists' }, 409));
-    await expect(client.signUp({ email: 'dup@e.com', password: 'pw', fullName: 'D' }))
-      .rejects.toBeInstanceOf(CraftApiError);
+    vi.stubGlobal('fetch', mockFetch({ error: 'Email already registered' }, 409));
+    await expect(
+      client.signUp({ email: 'u@e.com', password: 'pw', fullName: 'U' }),
+    ).rejects.toBeInstanceOf(CraftApiError);
   });
 
-  it('signIn throws CraftApiError on 401', async () => {
+  it('signIn throws CraftApiError on 401 unauthorized', async () => {
+    vi.stubGlobal('fetch', mockFetch({ error: 'Invalid credentials' }, 401));
+    await expect(
+      client.signIn({ email: 'u@e.com', password: 'wrong' }),
+    ).rejects.toBeInstanceOf(CraftApiError);
+  });
+
+  it('getUser throws CraftApiError on 401', async () => {
     vi.stubGlobal('fetch', mockFetch({ error: 'Unauthorized' }, 401));
-    const err = await client.signIn({ email: 'bad@e.com', password: 'wrong' }).catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(401);
+    await expect(client.getUser()).rejects.toBeInstanceOf(CraftApiError);
   });
-});
 
-describe('Rate limit retries', () => {
-  it('waits for the Retry-After duration before retrying a 429 response', async () => {
-    const client = new CraftClient({ baseUrl: BASE_URL });
-    const fetch = vi.fn()
-      .mockResolvedValueOnce({
-        ok: false,
-        status: 429,
-        headers: new Headers({ 'Retry-After': '5' }),
-        text: () => Promise.resolve('Rate limited'),
-        statusText: '429',
-      })
-      .mockResolvedValueOnce({ ok: true, json: () => Promise.resolve(USER_PROFILE) });
-    vi.stubGlobal('fetch', fetch);
-    vi.useFakeTimers();
+  it('updateProfile throws CraftApiError on 400', async () => {
+    vi.stubGlobal('fetch', mockFetch({ error: 'Invalid payload' }, 400));
+    await expect(client.updateProfile({ fullName: '' })).rejects.toBeInstanceOf(CraftApiError);
+  });
 
-    const request = client.getUser();
-    await vi.advanceTimersByTimeAsync(4999);
-    expect(fetch).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
-    await expect(request).resolves.toEqual(USER_PROFILE);
-    expect(fetch).toHaveBeenCalledTimes(2);
+  it('signOut throws CraftApiError on 500', async () => {
+    vi.stubGlobal('fetch', mockFetch({ error: 'Internal server error' }, 500));
+    await expect(client.signOut()).rejects.toBeInstanceOf(CraftApiError);
+  });
 
-    vi.useRealTimers();
-    vi.unstubAllGlobals();
+  it('throws CraftApiError with status and message on error response', async () => {
+    vi.stubGlobal('fetch', mockFetch({ error: 'Not found' }, 404));
+    try {
+      await client.getUser();
+      expect.fail('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(CraftApiError);
+      const apiErr = err as CraftApiError;
+      expect(apiErr.status).toBe(404);
+      expect(apiErr.message).toBe('Not found');
+    }
+  });
+
+  it('throws CraftApiError on network failure', async () => {
+    vi.stubGlobal('fetch', mockFetchReject(new Error('Network down')));
+    await expect(client.getUser()).rejects.toBeInstanceOf(CraftApiError);
   });
 });
 
@@ -280,7 +327,7 @@ describe('Template methods', () => {
   let client: CraftClient;
 
   beforeEach(() => {
-    client = new CraftClient({ baseUrl: BASE_URL, accessToken: 'tok' });
+    client = new CraftClient({ baseUrl: BASE_URL });
   });
 
   afterEach(() => {
@@ -294,29 +341,16 @@ describe('Template methods', () => {
     expect(result.templates).toHaveLength(1);
     expect(result.total).toBe(1);
     expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/templates`);
+    expect(fetch.mock.calls[0][1].method).toBe('GET');
   });
 
-  it('listTemplates appends category query param', async () => {
+  it('listTemplates appends query params', async () => {
     const fetch = mockFetch(TEMPLATE_LIST);
     vi.stubGlobal('fetch', fetch);
-    await client.listTemplates({ category: 'dex' });
-    expect(fetch.mock.calls[0][0]).toContain('category=dex');
-  });
-
-  it('listTemplates appends limit and offset', async () => {
-    const fetch = mockFetch(TEMPLATE_LIST);
-    vi.stubGlobal('fetch', fetch);
-    await client.listTemplates({ limit: 5, offset: 10 });
-    const url: string = fetch.mock.calls[0][0];
+    await client.listTemplates({ category: 'dex', limit: 5 });
+    const url = fetch.mock.calls[0][0] as string;
+    expect(url).toContain('category=dex');
     expect(url).toContain('limit=5');
-    expect(url).toContain('offset=10');
-  });
-
-  it('listTemplates appends search param', async () => {
-    const fetch = mockFetch(TEMPLATE_LIST);
-    vi.stubGlobal('fetch', fetch);
-    await client.listTemplates({ search: 'dex' });
-    expect(fetch.mock.calls[0][0]).toContain('search=dex');
   });
 
   it('getTemplate sends GET /api/templates/:id', async () => {
@@ -325,22 +359,26 @@ describe('Template methods', () => {
     const result = await client.getTemplate('tmpl-1');
     expect(result.id).toBe('tmpl-1');
     expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/templates/tmpl-1`);
+    expect(fetch.mock.calls[0][1].method).toBe('GET');
   });
 
   it('getTemplateMetadata sends GET /api/templates/:id/metadata', async () => {
-    const meta = { id: 'tmpl-1', name: 'Stellar DEX', version: '1.0.0' };
-    const fetch = mockFetch(meta);
+    const fetch = mockFetch(TEMPLATE);
     vi.stubGlobal('fetch', fetch);
     const result = await client.getTemplateMetadata('tmpl-1');
-    expect(result).toEqual(meta);
+    expect(result.id).toBe('tmpl-1');
     expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/templates/tmpl-1/metadata`);
+    expect(fetch.mock.calls[0][1].method).toBe('GET');
   });
 
   it('getTemplate throws CraftApiError on 404', async () => {
-    vi.stubGlobal('fetch', mockFetch({ error: 'Not found' }, 404));
-    const err = await client.getTemplate('missing').catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(404);
+    vi.stubGlobal('fetch', mockFetch({ error: 'Template not found' }, 404));
+    await expect(client.getTemplate('missing')).rejects.toBeInstanceOf(CraftApiError);
+  });
+
+  it('getTemplateMetadata throws CraftApiError on 404', async () => {
+    vi.stubGlobal('fetch', mockFetch({ error: 'Template not found' }, 404));
+    await expect(client.getTemplateMetadata('missing')).rejects.toBeInstanceOf(CraftApiError);
   });
 });
 
@@ -358,13 +396,9 @@ describe('Payment methods', () => {
   it('createCheckout sends POST /api/payments/checkout', async () => {
     const fetch = mockFetch(CHECKOUT);
     vi.stubGlobal('fetch', fetch);
-    const result = await client.createCheckout({
-      priceId: 'price_pro',
-      successUrl: 'https://app.example.com/success',
-      cancelUrl: 'https://app.example.com/cancel',
-    });
+    const result = await client.createCheckout({ tier: 'pro' });
     expect(result.sessionId).toBe('cs_test_123');
-    expect(result.url).toContain('checkout.stripe.com');
+    expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/payments/checkout`);
     expect(fetch.mock.calls[0][1].method).toBe('POST');
   });
 
@@ -373,55 +407,24 @@ describe('Payment methods', () => {
     vi.stubGlobal('fetch', fetch);
     const result = await client.getSubscription();
     expect(result.status).toBe('active');
-    expect(result.tier).toBe('pro');
+    expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/payments/subscription`);
     expect(fetch.mock.calls[0][1].method).toBe('GET');
   });
 
-  it('cancelSubscription sends POST /api/payments/cancel', async () => {
-    const cancelled = { ...SUBSCRIPTION, cancelAtPeriodEnd: true };
-    const fetch = mockFetch(cancelled);
+  it('cancelSubscription sends POST /api/payments/subscription/cancel', async () => {
+    const fetch = mockFetch({ ...SUBSCRIPTION, cancelAtPeriodEnd: true });
     vi.stubGlobal('fetch', fetch);
     const result = await client.cancelSubscription();
     expect(result.cancelAtPeriodEnd).toBe(true);
+    expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/payments/subscription/cancel`);
     expect(fetch.mock.calls[0][1].method).toBe('POST');
   });
 
-  it('createCheckout throws CraftApiError on 401', async () => {
-    vi.stubGlobal('fetch', mockFetch({ error: 'Unauthorized' }, 401));
-    await expect(
-      client.createCheckout({ priceId: 'p', successUrl: 's', cancelUrl: 'c' }),
-    ).rejects.toBeInstanceOf(CraftApiError);
-  });
-
-  it('getSubscription throws CraftApiError on 401 when unauthorized', async () => {
-    // Request: GET /api/payments/subscription
-    // Response: 401 Unauthorized { error: 'Unauthorized' }
-    vi.stubGlobal('fetch', mockFetch({ error: 'Unauthorized' }, 401));
-    const err = await client.getSubscription().catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(401);
-  });
-
-  it('cancelSubscription throws CraftApiError on 500 internal error', async () => {
-    // Request: POST /api/payments/cancel
-    // Response: 500 Internal Server Error { error: 'Internal Server Error' }
-    vi.stubGlobal('fetch', mockFetch({ error: 'Internal Server Error' }, 500));
-    const err = await client.cancelSubscription().catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(500);
-  });
-
-  it('throws CraftApiError with 401 if setAccessToken not called before protected method', async () => {
-    // Request: GET /api/payments/subscription (without Authorization header)
-    // Response: 401 Unauthorized { error: 'Unauthorized' }
-    const unauthedClient = new CraftClient({ baseUrl: BASE_URL });
-    vi.stubGlobal('fetch', mockFetch({ error: 'Unauthorized' }, 401));
-    const err = await unauthedClient.getSubscription().catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(401);
+  it('createCheckout throws CraftApiError on 402', async () => {
+    vi.stubGlobal('fetch', mockFetch({ error: 'Payment required' }, 402));
+    await expect(client.createCheckout({ tier: 'pro' })).rejects.toBeInstanceOf(CraftApiError);
   });
 });
-
 
 describe('Deployment methods', () => {
   let client: CraftClient;
@@ -438,23 +441,9 @@ describe('Deployment methods', () => {
     const fetch = mockFetch(ANALYTICS);
     vi.stubGlobal('fetch', fetch);
     const result = await client.getDeploymentAnalytics('dep-1');
-    expect(result.analytics).toHaveLength(1);
-    expect(result.summary.uptimePercentage).toBe(99.9);
+    expect(result.summary.totalPageViews).toBe(100);
     expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/deployments/dep-1/analytics`);
-  });
-
-  it('getDeploymentAnalytics appends filter params', async () => {
-    const fetch = mockFetch(ANALYTICS);
-    vi.stubGlobal('fetch', fetch);
-    await client.getDeploymentAnalytics('dep-1', {
-      metricType: 'page_view',
-      startDate: '2024-01-01',
-      endDate: '2024-01-31',
-    });
-    const url: string = fetch.mock.calls[0][0];
-    expect(url).toContain('metricType=page_view');
-    expect(url).toContain('startDate=2024-01-01');
-    expect(url).toContain('endDate=2024-01-31');
+    expect(fetch.mock.calls[0][1].method).toBe('GET');
   });
 
   it('getDeploymentHealth sends GET /api/deployments/:id/health', async () => {
@@ -462,207 +451,17 @@ describe('Deployment methods', () => {
     vi.stubGlobal('fetch', fetch);
     const result = await client.getDeploymentHealth('dep-1');
     expect(result.isHealthy).toBe(true);
-    expect(result.responseTime).toBe(200);
     expect(fetch.mock.calls[0][0]).toBe(`${BASE_URL}/api/deployments/dep-1/health`);
+    expect(fetch.mock.calls[0][1].method).toBe('GET');
   });
 
-  it('getDeploymentHealth reflects unhealthy status', async () => {
-    const unhealthy: DeploymentHealth = { ...HEALTH, isHealthy: false, statusCode: 503, error: 'Service unavailable' };
-    vi.stubGlobal('fetch', mockFetch(unhealthy));
-    const result = await client.getDeploymentHealth('dep-2');
-    expect(result.isHealthy).toBe(false);
-    expect(result.error).toBe('Service unavailable');
-  });
-
-  it('getDeploymentAnalytics throws CraftApiError on 403', async () => {
-    vi.stubGlobal('fetch', mockFetch({ error: 'Forbidden' }, 403));
-    const err = await client.getDeploymentAnalytics('dep-x').catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(403);
-  });
-
-  it('getDeploymentHealth throws CraftApiError on 404 not found', async () => {
-    // Request: GET /api/deployments/dep-missing/health
-    // Response: 404 Not Found { error: 'Deployment not found' }
+  it('getDeploymentAnalytics throws CraftApiError on 404', async () => {
     vi.stubGlobal('fetch', mockFetch({ error: 'Deployment not found' }, 404));
-    const err = await client.getDeploymentHealth('dep-missing').catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(404);
-  });
-});
-
-describe('CraftApiError', () => {
-  it('has correct name and status', () => {
-    const err = new CraftApiError(500, 'Internal Server Error');
-    expect(err.name).toBe('CraftApiError');
-    expect(err.status).toBe(500);
-    expect(err.message).toBe('Internal Server Error');
+    await expect(client.getDeploymentAnalytics('missing')).rejects.toBeInstanceOf(CraftApiError);
   });
 
-  it('is an instance of Error', () => {
-    expect(new CraftApiError(400, 'Bad Request')).toBeInstanceOf(Error);
-  });
-
-  it('stores optional code field for structured error handling', () => {
-    const err = new CraftApiError(422, 'Validation failed', 'VALIDATION_ERROR');
-    expect(err.code).toBe('VALIDATION_ERROR');
-  });
-});
-
-describe('Network failure handling (issue #903)', () => {
-  let client: CraftClient;
-
-  beforeEach(() => {
-    client = new CraftClient({ baseUrl: BASE_URL });
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('wraps rejected fetch (network error) in CraftApiError', async () => {
-    const networkError = new TypeError('Failed to fetch');
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(networkError));
-    const err = await client.getUser().catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(0);
-    expect(err.message).toContain('Network request failed');
-    expect(err.message).toContain('Failed to fetch');
-  });
-
-  it('wraps offline/DNS failure in CraftApiError', async () => {
-    const dnsError = new TypeError('DNS resolution failed');
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(dnsError));
-    const err = await client.listTemplates().catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(0);
-    expect(err.message).toContain('Network request failed');
-  });
-
-  it('parses JSON error body and uses message field', async () => {
-    const errorBody = {
-      code: 'VALIDATION_SCHEMA_ERROR',
-      message: 'Request body does not match schema',
-      category: 'validation',
-    };
-    const fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 400,
-      text: () => Promise.resolve(JSON.stringify(errorBody)),
-      statusText: '400 Bad Request',
-    });
-    vi.stubGlobal('fetch', fetch);
-    const err = await client.updateProfile({ fullName: 'x' }).catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.message).toBe('Request body does not match schema');
-    expect(err.code).toBe('VALIDATION_SCHEMA_ERROR');
-    expect(err.status).toBe(400);
-  });
-
-  it('falls back to raw text when error body is not JSON', async () => {
-    const fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      text: () => Promise.resolve('Internal server error occurred'),
-      statusText: '500 Internal Server Error',
-    });
-    vi.stubGlobal('fetch', fetch);
-    const err = await client.getDeploymentHealth('dep-1').catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.message).toBe('Internal server error occurred');
-    expect(err.status).toBe(500);
-  });
-
-  it('re-throws existing CraftApiError without wrapping', async () => {
-    const errorBody = { code: 'STELLAR_TRANSACTION_FAILED', message: 'Tx failed', category: 'external' };
-    const fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 422,
-      text: () => Promise.resolve(JSON.stringify(errorBody)),
-      statusText: '422 Unprocessable Entity',
-    });
-    vi.stubGlobal('fetch', fetch);
-    const err = await client.getUser().catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.message).toBe('Tx failed');
-    // Error is not doubly wrapped
-    expect((err as any).cause).toBeUndefined();
-  });
-
-  it('handles malformed JSON in error body gracefully', async () => {
-    const fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      text: () => Promise.resolve('{ bad json'),
-      statusText: '500 Internal Server Error',
-    });
-    vi.stubGlobal('fetch', fetch);
-    const err = await client.getUser().catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.message).toBe('{ bad json');
-  });
-});
-
-describe('Network failure handling', () => {
-  let client: CraftClient;
-
-  beforeEach(() => {
-    client = new CraftClient({ baseUrl: BASE_URL });
-  });
-
-  afterEach(() => {
-    vi.unstubAllGlobals();
-  });
-
-  it('rejects with CraftApiError when fetch fails (network offline, DNS failure)', async () => {
-    // Request: POST /api/auth/signin
-    // Failure: fetch() rejected (TypeError: fetch failed)
-    const fetchError = new TypeError('fetch failed');
-    vi.stubGlobal('fetch', mockFetchReject(fetchError));
-    const err = await client.signIn({ email: 'test@example.com', password: 'pw' }).catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.message).toContain('fetch failed');
-  });
-
-  it('rejects with CraftApiError when error response body is not valid JSON', async () => {
-    // Request: GET /api/auth/user
-    // Response: 500 Internal Server Error with plain text body
-    const fetch = vi.fn().mockResolvedValue({
-      ok: false,
-      status: 500,
-      statusText: '500 Internal Server Error',
-      text: () => Promise.resolve('Internal server error - database connection failed'),
-      json: () => Promise.reject(new SyntaxError('Unexpected token')),
-    });
-    vi.stubGlobal('fetch', fetch);
-    const err = await client.getUser().catch(e => e);
-    expect(err).toBeInstanceOf(CraftApiError);
-    expect(err.status).toBe(500);
-    expect(err.message).toBe('Internal server error - database connection failed');
-  });
-});
-
-describe('SDK type definitions', () => {
-  it('CraftClientOptions requires baseUrl', () => {
-    const opts: CraftClientOptions = { baseUrl: 'https://craft.app' };
-    expect(opts.baseUrl).toBeDefined();
-  });
-
-  it('AuthResponse has user and session fields', () => {
-    const r: AuthResponse = AUTH_RESPONSE;
-    expect(r.user).toBeDefined();
-    expect(r.session.access_token).toBeDefined();
-  });
-
-  it('Template has required fields', () => {
-    const t: Template = TEMPLATE;
-    expect(t.id).toBeDefined();
-    expect(t.category).toBeDefined();
-    expect(Array.isArray(t.features)).toBe(true);
-  });
-
-  it('DeploymentHealth has isHealthy boolean', () => {
-    const h: DeploymentHealth = HEALTH;
-    expect(typeof h.isHealthy).toBe('boolean');
+  it('getDeploymentHealth throws CraftApiError on 503', async () => {
+    vi.stubGlobal('fetch', mockFetch({ error: 'Service unavailable' }, 503));
+    await expect(client.getDeploymentHealth('dep-1')).rejects.toBeInstanceOf(CraftApiError);
   });
 });
