@@ -57,6 +57,15 @@ GITHUB_APP_INSTALLATION_ID=12345678
 GITHUB_API_BASE_URL=https://api.github.com
 STRIPE_SECRET_KEY=your_stripe_key
 STRIPE_WEBHOOK_SECRET=your_webhook_secret
+
+# Alerting
+SLACK_WEBHOOK_URL=your_slack_webhook_url # secret (no default)
+ADMIN_EMAIL=admin@example.com
+
+# Vercel Circuit Breaker
+VERCEL_CB_FAILURE_THRESHOLD=5
+VERCEL_CB_RESET_TIMEOUT_MS=30000
+SCOPE_VALIDATION_CACHE_TTL_MS=60000
 ```
 
 ---
