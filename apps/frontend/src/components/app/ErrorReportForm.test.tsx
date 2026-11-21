@@ -36,6 +36,33 @@ describe('ErrorReportForm', () => {
         expect(onClose).toHaveBeenCalledOnce();
     });
 
+    it('calls onClose when Escape is pressed', () => {
+        const onClose = vi.fn();
+        render(<ErrorReportForm errorContext={ERROR_CONTEXT} onClose={onClose} />);
+        fireEvent.keyDown(document, { key: 'Escape' });
+        expect(onClose).toHaveBeenCalledOnce();
+    });
+
+    it('focuses the description textarea on mount', () => {
+        render(<ErrorReportForm errorContext={ERROR_CONTEXT} onClose={vi.fn()} />);
+        expect(document.activeElement).toBe(screen.getByLabelText('What were you doing?'));
+    });
+
+    it('restores focus to the previously focused element on unmount', () => {
+        const trigger = document.createElement('button');
+        document.body.appendChild(trigger);
+        trigger.focus();
+        expect(document.activeElement).toBe(trigger);
+
+        const { unmount } = render(
+            <ErrorReportForm errorContext={ERROR_CONTEXT} onClose={vi.fn()} />
+        );
+        unmount();
+
+        expect(document.activeElement).toBe(trigger);
+        document.body.removeChild(trigger);
+    });
+
     it('submit button is disabled when description is empty', () => {
         render(<ErrorReportForm errorContext={ERROR_CONTEXT} onClose={vi.fn()} />);
         const btn = screen.getByRole('button', { name: 'Submit report' }) as HTMLButtonElement;

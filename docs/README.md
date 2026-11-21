@@ -31,7 +31,18 @@ Comprehensive documentation for the CRAFT platform.
 
 ### Installation
 
-```bash
+```
+
+## Performance tuning
+
+The following environment variables can be used to tune backend performance. They are optional and have the listed defaults.
+
+- `HEALTH_CHECK_BUDGET_MS` (default: `60000`) – Maximum time budget in milliseconds for a single health‑check cron run.
+- `HEALTH_CHECK_CONCURRENCY` – Number of concurrent health checks performed per batch. (default defined in code)
+- `WORKER_CONCURRENCY` – Number of concurrent worker processes. (default defined in code)
+- `LOG_BATCH_SIZE` – Number of log entries to batch before writing to the database. (default defined in code)
+- `LOG_FLUSH_INTERVAL_MS` – Interval in milliseconds to flush log batches. (default defined in code)
+bash
 # Clone the repository
 git clone <repository-url>
 
@@ -55,12 +66,30 @@ GITHUB_APP_ID=123456
 GITHUB_APP_PRIVATE_KEY="-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
 GITHUB_APP_INSTALLATION_ID=12345678
 GITHUB_API_BASE_URL=https://api.github.com
+
+# GitHub Branch Protection and Token Encryption
+# GITHUB_DEPLOYMENT_BRANCH: The branch to which deployments are pushed (default: main)
+# GITHUB_PROTECTED_BRANCH: The branch protected by required status checks (default: main)
+# GITHUB_REQUIRED_STATUS_CHECKS: Comma‑separated list of required status check contexts (e.g., "craft/deployment,ci/build")
+# GITHUB_TOKEN: GitHub token with `repo:status` scope. Keep secret.
+# GITHUB_TOKEN_ENCRYPTION_KEY: 32‑byte base64 key used to encrypt the token at rest.
+#   Generate with: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
 STRIPE_SECRET_KEY=your_stripe_key
 STRIPE_WEBHOOK_SECRET=your_webhook_secret
 STRIPE_TAX_ENABLED=false # Set to true to enable Stripe Tax collection
 STRIPE_TAX_COLLECT_ID=your_tax_collect_id # Stripe Tax collection ID (optional)
 VERCEL_PROTECTION_BYPASS_SECRET=your_secret # Sensitive: secret for preview bypass tokens
+
+# Cron & Admin
+# Secret used to authenticate cron route calls. Required in production.
+# Generate a random secret with: openssl rand -hex 32
+CRON_SECRET=your_cron_secret
+# Comma-separated list of admin user IDs (UUIDs) granted the admin role.
+# Example: ADMIN_USER_IDS=11111111-1111-1111-1111-111111111111,22222222-2222-2222-2222-222222222222
+ADMIN_USER_IDS=
 ```
+
+See [RBAC & Admin Middleware](./rbac-admin-middleware.md) for details on admin role resolution.
 
 ---
 

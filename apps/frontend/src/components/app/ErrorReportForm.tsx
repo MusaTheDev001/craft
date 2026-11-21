@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import type { ErrorContext } from '@craft/types';
 
 interface ErrorReportFormProps {
@@ -52,6 +52,30 @@ export function ErrorReportForm({
     const [description, setDescription] = useState('');
     const [status, setStatus] = useState<FormStatus>('idle');
     const [submitError, setSubmitError] = useState<string | null>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+    // Focus the textarea on mount and restore focus to the previously
+    // focused element on unmount.
+    useEffect(() => {
+        const previouslyFocused = document.activeElement as HTMLElement | null;
+        textareaRef.current?.focus();
+        return () => {
+            previouslyFocused?.focus?.();
+        };
+    }, []);
+
+    // Close the dialog when Escape is pressed while mounted.
+    useEffect(() => {
+        function handleKeyDown(e: KeyboardEvent) {
+            if (e.key === 'Escape') {
+                onClose();
+            }
+        }
+        document.addEventListener('keydown', handleKeyDown);
+        return () => {
+            document.removeEventListener('keydown', handleKeyDown);
+        };
+    }, [onClose]);
 
     const length = description.length;
     const remaining = MAX_DESCRIPTION_LENGTH - length;
@@ -140,6 +164,7 @@ export function ErrorReportForm({
                                 </label>
                                 <textarea
                                     id="error-description"
+                                    ref={textareaRef}
                                     value={description}
                                     onChange={(e) => setDescription(e.target.value)}
                                     placeholder="e.g. I clicked Deploy after filling in the branding form…"
