@@ -76,6 +76,14 @@ GITHUB_API_BASE_URL=https://api.github.com
 #   Generate with: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
 STRIPE_SECRET_KEY=your_stripe_key
 STRIPE_WEBHOOK_SECRET=your_webhook_secret
+# Artifact signing
+# ARTIFACT_SIGNING_SECRET is the current secret used to sign deployment artifacts.
+# ARTIFACT_SIGNING_SECRET_PREVIOUS is the previous secret retained only during rotation.
+ARTIFACT_SIGNING_SECRET=your_artifact_signing_secret
+ARTIFACT_SIGNING_SECRET_PREVIOUS=your_previous_artifact_signing_secret
+# DEPLOYMENT_ARTIFACT_BUCKET is the storage bucket for signed artifacts.
+# Defaults to 'craft-deployment-artifacts' if not overridden.
+DEPLOYMENT_ARTIFACT_BUCKET=craft-deployment-artifacts
 
 # Email (transactional email provider - e.g., Resend, SendGrid)
 # When EMAIL_API_URL is unset, emails are logged to console instead of sent (dev mode)
