@@ -171,6 +171,19 @@ The filter bar uses `flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-
 
 ---
 
+## Template Dependencies
+
+All four templates (`dex`, `lending`, `payment`, `asset-issuance`) pin the same framework versions so generated repositories start on a patched release:
+
+| Package | Version |
+|---|---|
+| `next` | `14.2.25` |
+| `eslint-config-next` | `14.2.25` |
+
+`14.2.25` is the minimum patched release for the middleware authorization bypass (CVE-2025-29927). Keep all four templates on the identical version when bumping.
+
+---
+
 ## Edge Cases & Assumptions
 
 - **Slow network**: the loading skeleton prevents layout shift; the abort controller cancels in-flight requests when filters change rapidly.
@@ -178,4 +191,4 @@ The filter bar uses `flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-
 - **Long template names**: the card title does not clamp; descriptions clamp at 2 lines.
 - **Single result**: the results count reads "1 template found" (singular).
 - **Sort**: not implemented; order is determined server-side. A future sort control (e.g. "Newest", "Most deployed") can be added to the filter bar without breaking the existing layout.
-- **Pagination**: not implemented in the current UI; the API supports `limit`/`offset` for future use.
+- **Pagination**: no
