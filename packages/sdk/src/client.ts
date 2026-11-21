@@ -197,10 +197,19 @@ export class CraftClient {
 
   /**
    * Sets the access token for subsequent authenticated requests.
-   * @param token - JWT access token
+   * Passing `undefined` clears the token, so no `Authorization` header is sent.
+   * @param token - JWT access token, or `undefined` to clear it
    */
-  setAccessToken(token: string): void {
+  setAccessToken(token: string | undefined): void {
     this.accessToken = token;
+  }
+
+  /**
+   * Clears the stored access token so subsequent requests are unauthenticated.
+   * Called automatically at the end of a successful `signOut()`.
+   */
+  clearAccessToken(): void {
+    this.accessToken = undefined;
   }
 
   private headers(): Record<string, string> {
@@ -311,10 +320,11 @@ export class CraftClient {
   }
 
   /**
-   * Signs out the current user.
+   * Signs out the current user and clears the stored access token.
    */
   async signOut(): Promise<void> {
-    return this.request<void>('POST', '/api/auth/signout');
+    await this.request<void>('POST', '/api/auth/signout');
+    this.clearAccessToken();
   }
 
   /**

@@ -5,7 +5,7 @@
  * Handles JWT token generation, validation, and region-aware session management.
  */
 
-import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
+import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.7';
 import { SUPPORTED_REGIONS, getRegionalEndpointConfig, detectRegionFromRequest } from '../_shared/regions.ts';
 
 // Re-export detectRegionFromRequest for backwards compatibility

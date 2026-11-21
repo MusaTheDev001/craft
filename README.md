@@ -18,3 +18,8 @@ A monorepo of Stellar/Soroban templates and applications.
 ## Development
 
 Install dependencies from the repository root, then run the relevant workspace scripts (for example `npm run --workspace @craft/frontend test -- app` and `npm run lint`).
+
+## Handsoff notes
+
+<!-- handsoff-issue-1434 -->
+- #1434: Replace the Select-Then-Insert Profile Sync With an Atomic Upsert in Cross-Region Auth Utilities
