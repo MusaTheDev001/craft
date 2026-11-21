@@ -77,6 +77,13 @@ GITHUB_API_BASE_URL=https://api.github.com
 STRIPE_SECRET_KEY=your_stripe_key
 STRIPE_WEBHOOK_SECRET=your_webhook_secret
 
+# Email (transactional email provider - e.g., Resend, SendGrid)
+# When EMAIL_API_URL is unset, emails are logged to console instead of sent (dev mode)
+EMAIL_API_URL=https://api.resend.com
+EMAIL_API_KEY=your_email_api_key
+EMAIL_FROM=notifications@craft.app
+# EMAIL_WEBHOOK_SECRET must be a random string for webhook signature verification
+EMAIL_WEBHOOK_SECRET=your_random_webhook_secret
 # Cron & Admin
 # Secret used to authenticate cron route calls. Required in production.
 # Generate a random secret with: openssl rand -hex 32
