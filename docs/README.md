@@ -76,6 +76,9 @@ GITHUB_API_BASE_URL=https://api.github.com
 #   Generate with: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
 STRIPE_SECRET_KEY=your_stripe_key
 STRIPE_WEBHOOK_SECRET=your_webhook_secret
+STRIPE_TAX_ENABLED=false # Set to true to enable Stripe Tax collection
+STRIPE_TAX_COLLECT_ID=your_tax_collect_id # Stripe Tax collection ID (optional)
+VERCEL_PROTECTION_BYPASS_SECRET=your_secret # Sensitive: secret for preview bypass tokens
 
 # Alerting
 SLACK_WEBHOOK_URL=your_slack_webhook_url # secret (no default)
