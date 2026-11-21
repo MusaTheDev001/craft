@@ -51,9 +51,12 @@ export function StatusBadge({ status, label, onClick }: StatusBadgeProps) {
         ${config.bgColor} ${config.textColor}
         ${onClick ? 'cursor-pointer hover:opacity-80 transition-opacity' : ''}
       `}
-      {...(onClick && { type: 'button' })}
+      {...(onClick ? { type: 'button' } : { role: 'status' })}
     >
-      <span className={`w-2 h-2 rounded-full ${config.dotColor}`} />
+      <span
+        className={`w-2 h-2 rounded-full ${config.dotColor}`}
+        aria-hidden="true"
+      />
       {displayLabel}
     </Component>
   );

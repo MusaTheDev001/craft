@@ -42,6 +42,29 @@
 import type { SupabaseClient } from '@supabase/supabase-js';
 import { encryptToken, decryptToken } from '@/lib/github/token-encryption';
 
+/**
+ * Unified GitHub OAuth client identifier.
+ *
+ * Historically the codebase referenced two environment variables:
+ *   - `GITHUB_CLIENT_ID`
+ *   - `GITHUB_OAUTH_CLIENT_ID`
+ *
+ * To avoid breaking existing deployments we support both, preferring the
+ * canonical `GITHUB_CLIENT_ID`. If only the deprecated name is present we emit a
+ * runtime warning (once) and continue.
+ */
+export const GITHUB_CLIENT_ID: string = (() => {
+  const primary = process.env.GITHUB_CLIENT_ID;
+  const fallback = process.env.GITHUB_OAUTH_CLIENT_ID;
+  if (primary) return primary;
+  if (fallback) {
+    // eslint-disable-next-line no-console
+    console.warn('[DEPRECATED] GITHUB_OAUTH_CLIENT_ID is deprecated; use GITHUB_CLIENT_ID instead.');
+    return fallback;
+  }
+  throw new Error('Missing required environment variable: GITHUB_CLIENT_ID');
+})();
+
 const GITHUB_API_BASE = 'https://api.github.com';
 
 /** How many milliseconds before the stated expiry we treat the token as expired. */

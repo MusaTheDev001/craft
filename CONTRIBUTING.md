@@ -4,6 +4,7 @@ This repository uses a monorepo layout (`apps/*`, `packages/*`) with tests and l
 
 ## General Workflow
 
+- The `apps/backend/scratch/` directory is ignored via `.gitignore`.
 1. Create a focused branch for your issue.
 2. Keep changes scoped and reviewable.
 3. Add or update tests with behavior changes.

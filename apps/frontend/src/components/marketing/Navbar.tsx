@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
+import Link from 'next/link';
 
 interface NavLink {
   label: string;
@@ -9,6 +10,7 @@ interface NavLink {
 
 interface NavbarProps {
   links?: NavLink[];
+  activeHref?: string;
   onLoginClick?: () => void;
   onCtaClick?: () => void;
 }
@@ -19,21 +21,23 @@ export function Navbar({
     { label: 'Features', href: '#features' },
     { label: 'Pricing', href: '#pricing' },
   ],
+  activeHref,
   onLoginClick,
   onCtaClick,
 }: NavbarProps) {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const mobileMenuId = 'marketing-navbar-mobile-menu';
 
   return (
     <nav className="fixed top-0 w-full z-50 bg-slate-50/70 backdrop-blur-xl border-b border-slate-200/20 shadow-sm">
       <div className="flex justify-between items-center max-w-7xl mx-auto px-6 h-16">
         <div className="flex items-center gap-8">
-          <a 
+          <Link 
             href="/" 
             className="text-xl font-bold tracking-tighter text-blue-900 font-headline"
           >
             CRAFT
-          </a>
+          </Link>
           
           {/* Desktop Navigation */}
           <div className="hidden md:flex items-center gap-6">
@@ -42,7 +46,7 @@ export function Navbar({
                 key={index}
                 href={link.href}
                 className={`${
-                  index === 0 
+                  link.href === activeHref
                     ? 'text-blue-600 font-semibold' 
                     : 'text-slate-600 hover:text-blue-900'
                 } transition-colors font-headline text-sm tracking-tight`}
@@ -73,6 +77,8 @@ export function Navbar({
             onClick={() => setMobileMenuOpen(!mobileMenuOpen)}
             className="md:hidden text-slate-600 hover:text-blue-900 p-2 transition-colors"
             aria-label="Toggle menu"
+            aria-expanded={mobileMenuOpen}
+            aria-controls={mobileMenuId}
           >
             <svg
               className="w-6 h-6 transition-transform duration-300 ease-in-out"
@@ -101,8 +107,11 @@ export function Navbar({
 
       {/* Mobile menu */}
       <div 
+        id={mobileMenuId}
+        inert={!mobileMenuOpen}
+        aria-hidden={!mobileMenuOpen}
         className={`md:hidden border-t border-slate-200/20 bg-slate-50/95 backdrop-blur-xl overflow-hidden transition-all duration-300 ease-in-out ${
-          mobileMenuOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0'
+          mobileMenuOpen ? 'max-h-96 opacity-100' : 'max-h-0 opacity-0 invisible'
         }`}
       >
         <div className={`px-6 py-4 space-y-3 transition-all duration-300 ${
