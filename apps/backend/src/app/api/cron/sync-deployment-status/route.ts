@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { githubToVercelDeploymentService } from '@/services/github-to-vercel-deployment.service';
 import { createClient } from '@/lib/supabase/server';
 import { withCronAuth } from '@/lib/api/cron-auth';
+import { logger } from '@/lib/api/logger';
 
 /**
  * Cron endpoint to sync Vercel deployment status for stale deployments
@@ -16,12 +17,13 @@ import { withCronAuth } from '@/lib/api/cron-auth';
  * - Reschedules deployments that hit rate limits for retry in next cycle
  */
 
+const JOB_NAME = 'sync-deployment-status';
 const BATCH_SIZE = 10;
 const MAX_CONCURRENT = 5;
 
 async function handleSync(req: NextRequest) {
     try {
-        console.log('Running sync-deployment-status cron...');
+        logger.info('Cron job started', { job: JOB_NAME });
 
         const supabase = createClient();
 
@@ -34,11 +36,18 @@ async function handleSync(req: NextRequest) {
             .lt('created_at', twoMinutesAgo);
 
         if (fetchError) {
-            console.error('Failed to fetch stale deployments:', fetchError);
+            logger.error('Failed to fetch stale deployments', {
+                job: JOB_NAME,
+                error: fetchError.message,
+            });
             return NextResponse.json({ error: 'Failed to fetch stale deployments' }, { status: 500 });
         }
 
-        console.log(`Found ${staleDeployments?.length || 0} stale deployments to sync`);
+        const staleCount = staleDeployments?.length || 0;
+        logger.info('Found stale deployments to sync', {
+            job: JOB_NAME,
+            count: staleCount,
+        });
 
         let syncedCount = 0;
         let failedCount = 0;
@@ -55,7 +64,12 @@ async function handleSync(req: NextRequest) {
             }
         }
 
-        console.log(`Sync complete: ${syncedCount} synced, ${failedCount} failed, ${rescheduledCount} rescheduled`);
+        logger.info('Cron job completed', {
+            job: JOB_NAME,
+            synced: syncedCount,
+            failed: failedCount,
+            rescheduled: rescheduledCount,
+        });
 
         return NextResponse.json({
             synced: syncedCount,
@@ -63,7 +77,10 @@ async function handleSync(req: NextRequest) {
             rescheduled: rescheduledCount,
         });
     } catch (error: any) {
-        console.error('Error running sync-deployment-status cron:', error);
+        logger.error('Error running cron job', {
+            job: JOB_NAME,
+            error: error?.message || String(error),
+        });
         return NextResponse.json(
             { error: error.message || 'Sync failed' },
             { status: 500 }
@@ -97,12 +114,17 @@ async function processBatchWithBackpressure(
                 }
             } catch (err: any) {
                 if (isRateLimited(err)) {
-                    console.warn(
-                        `Rate limited on ${d.vercel_deployment_id}, will retry next cycle`
-                    );
+                    logger.warn('Deployment rate limited, will retry next cycle', {
+                        job: JOB_NAME,
+                        deploymentId: d.vercel_deployment_id,
+                    });
                     rescheduled++;
                 } else {
-                    console.error(`Error syncing deployment ${d.vercel_deployment_id}:`, err);
+                    logger.error('Error syncing deployment', {
+                        job: JOB_NAME,
+                        deploymentId: d.vercel_deployment_id,
+                        error: err?.message || String(err),
+                    });
                     failed++;
                 }
             } finally {
