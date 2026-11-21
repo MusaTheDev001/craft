@@ -1,40 +1,25 @@
-# CRAFT
+# Craft
 
-** Democratizing DeFi Development on Stellar**
+A monorepo of Stellar/Soroban templates and applications.
 
-CRAFT is a powerful no-code platform that enables anyone to deploy production-ready, customized DeFi applications on the Stellar blockchain in minutes. Whether you're building a DEX, payment gateway, or asset issuance platform, CRAFT provides the tools, templates, and infrastructure to bring your vision to life without writing a single line of code.
+## Tech Stack
 
-![CRAFT Platform](https://img.shields.io/badge/Status-In%20Development-yellow)
-![Next.js](https://img.shields.io/badge/Next.js-14-black)
-![Stellar](https://img.shields.io/badge/Stellar-Blockchain-blue)
-![TypeScript](https://img.shields.io/badge/TypeScript-5.3-blue)
-![License](https://img.shields.io/badge/License-Proprietary-red)
+- **Next.js** — minimum supported version is **14.2.25** (patched 14.2.x line) across `apps/backend` and `apps/frontend` to address known security advisories, including the middleware authorization bypass (CVE-2025-29927).
+- **React** — UI library used by the frontend and templates.
+- **TypeScript** — typed JavaScript across all workspaces.
+- **Stellar / Soroban** — smart contract and DEX templates.
 
----
+## Workspaces
 
-## Table of Contents
+- `apps/backend` — API and backend services.
+- `apps/frontend` — web application.
+- `templates/*` — starter templates for Stellar/Soroban projects.
 
-- [Overview](#-overview)
-- [Key Features](#-key-features)
-- [Architecture](#-architecture)
-- [Getting Started](#-getting-started)
-- [Available Templates](#-available-templates)
-- [Tech Stack](#-tech-stack)
-- [API Documentation](#-api-documentation)
-- [Database Schema](#-database-schema)
-- [Deployment Guide](#-deployment-guide)
-- [Configuration](#-configuration)
-- [Security](#-security)
-- [Testing](#-testing)
-- [Monitoring & Analytics](#-monitoring--analytics)
-- [Troubleshooting](#-troubleshooting)
-- [Contributing](#-contributing)
-- [Roadmap](#-roadmap)
-- [License](#-license)
+## Development
 
----
+Install dependencies from the repository root, then run the relevant workspace scripts (for example `npm run --workspace @craft/frontend test -- app` and `npm run lint`).
 
-## Overview
+## Handsoff notes
 
 CRAFT (Customizable Rapid Application Framework for Trading) is designed to lower the barrier to entry for DeFi development on Stellar. Instead of spending weeks or months building infrastructure, developers and entrepreneurs can:
 
@@ -2001,3 +1986,8 @@ CRAFT wouldn't be possible without these amazing projects and communities:
 
 ## Automated PR Test
 This change is added by GitHub Copilot exercise.
+
+## Handsoff notes
+
+<!-- handsoff-issue-1481 -->
+- #1481: Document the Request Size Limits and Branding Upload Constraints in the API Reference

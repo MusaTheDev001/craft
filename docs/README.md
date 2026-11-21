@@ -80,7 +80,22 @@ GITHUB_API_BASE_URL=https://api.github.com
 #   Generate with: `node -e "console.log(require('crypto').randomBytes(32).toString('base64'))"`
 STRIPE_SECRET_KEY=your_stripe_key
 STRIPE_WEBHOOK_SECRET=your_webhook_secret
+# Artifact signing
+# ARTIFACT_SIGNING_SECRET is the current secret used to sign deployment artifacts.
+# ARTIFACT_SIGNING_SECRET_PREVIOUS is the previous secret retained only during rotation.
+ARTIFACT_SIGNING_SECRET=your_artifact_signing_secret
+ARTIFACT_SIGNING_SECRET_PREVIOUS=your_previous_artifact_signing_secret
+# DEPLOYMENT_ARTIFACT_BUCKET is the storage bucket for signed artifacts.
+# Defaults to 'craft-deployment-artifacts' if not overridden.
+DEPLOYMENT_ARTIFACT_BUCKET=craft-deployment-artifacts
 
+# Email (transactional email provider - e.g., Resend, SendGrid)
+# When EMAIL_API_URL is unset, emails are logged to console instead of sent (dev mode)
+EMAIL_API_URL=https://api.resend.com
+EMAIL_API_KEY=your_email_api_key
+EMAIL_FROM=notifications@craft.app
+# EMAIL_WEBHOOK_SECRET must be a random string for webhook signature verification
+EMAIL_WEBHOOK_SECRET=your_random_webhook_secret
 # Cron & Admin
 # Secret used to authenticate cron route calls. Required in production.
 # Generate a random secret with: openssl rand -hex 32
@@ -90,7 +105,16 @@ CRON_SECRET=your_cron_secret
 ADMIN_USER_IDS=
 ```
 
+# Compliance
+# JSON configuration for asset compliance checks.
+# Provide a blocklist of issuer accounts and jurisdiction rules.
+# When unset, compliance checks are disabled (no warnings).
+COMPLIANCE_BLOCKLIST_JSON='[{"issuer":"GAAAAAAA...","reason":"Example blocked issuer"}]'
+COMPLIANCE_JURISDICTION_JSON='[{"jurisdiction":"US","blockedAssets":["TOKEN"]}]'
+# See docs/asset-validation-rules.md for details.
+
 See [RBAC & Admin Middleware](./rbac-admin-middleware.md) for details on admin role resolution.
+See [Cron Authentication](./cron-authentication.md) for how cron routes are authenticated and how to rotate `CRON_SECRET`.
 
 ---
 

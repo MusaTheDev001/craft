@@ -47,6 +47,40 @@ Soroban RPC is used for smart contract interactions.
 | **Testnet** | `https://soroban-testnet.stellar.org` |
 | **Mainnet** | `https://mainnet.stellar.validationcloud.io/v1/soroban/rpc` |
 
+### Default Mainnet Soroban RPC Endpoint (Third-Party Provider)
+
+`SOROBAN_RPC_URLS.mainnet` defaults to a **third-party provider** rather than an endpoint operated by the Stellar Development Foundation:
+
+```
+https://mainnet.stellar.validationcloud.io/v1/soroban/rpc
+```
+
+**Why this default was chosen**: The Stellar Development Foundation does not operate a public, unauthenticated Soroban RPC endpoint for mainnet. To let CRAFT work out of the box on mainnet without requiring operators to provision their own RPC infrastructure, the default points at Validation Cloud's public Soroban RPC gateway. Testnet, by contrast, uses the SDF-operated `https://soroban-testnet.stellar.org`.
+
+#### Trust and Security Implications
+
+Because the default mainnet endpoint is operated by a third party, operators should understand the following before relying on it in production:
+
+- **Data exposure**: Every Soroban RPC request (contract invocations, ledger queries, transaction submissions) is sent to Validation Cloud. Treat the endpoint as an untrusted intermediary and avoid sending sensitive data through it.
+- **Availability and rate limits**: Uptime, throughput, and rate limits are controlled by the provider, not by CRAFT or the SDF. The public gateway may throttle or become unavailable without notice.
+- **Operator expectations**: A mainnet deployment will silently use a third-party service unless overridden. If your security policy requires first-party or self-hosted infrastructure, you **must** override the default (see below).
+- **Integrity**: Responses are not independently verified by CRAFT. For high-assurance deployments, run your own Soroban RPC node or use a provider you have vetted.
+
+#### Overriding the Default Endpoint
+
+Override the mainnet Soroban RPC endpoint with the `NEXT_PUBLIC_SOROBAN_RPC_URL` environment variable. When set, it takes precedence over the built-in default:
+
+```bash
+# Point mainnet at your own Soroban RPC node or a vetted provider
+NEXT_PUBLIC_SOROBAN_RPC_URL=https://rpc.example.com/soroban/rpc
+```
+
+The override must use HTTPS (see [Configuration Consistency Checks](#configuration-consistency-checks)) and should be reachable from your deployment environment.
+
+#### Failover Configuration
+
+To configure multiple endpoints and automatic failover between them, see the failover configuration guidance in the Soroban RPC section of the Stellar integration docs. Failover lets you list a primary endpoint plus fallbacks so a single provider outage does not take down contract interactions.
+
 ### Soroban RPC Methods
 
 - `getNetwork` - Get network information
@@ -197,7 +231,7 @@ The following values differ between testnet and mainnet:
 |----------|---------|---------|
 | Network Passphrase | `Test SDF Network ; September 2015` | `Public Global Stellar Network ; September 2015` |
 | Horizon URL | `https://horizon-testnet.stellar.org` | `https://horizon.stellar.org` |
-| Soroban RPC URL | `https://soroban-testnet.stellar.org` | `https://mainnet.stellar.validationcloud.io/v1/soroban/rpc` |
+| Soroban RPC URL | `https://soroban-testnet.stellar.org` | `https://mainnet.stellar.validationcloud.io/v1/soroban/rpc` (third-party default; override with `NEXT_PUBLIC_SOROBAN_RPC_URL`) |
 | Asset Issuers | Testnet-specific | Mainnet-specific |
 
 ## References

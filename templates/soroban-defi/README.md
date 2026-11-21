@@ -33,6 +33,12 @@ This template is configured via environment variables. See `.env.example` for av
 - **NEXT_PUBLIC_PRIMARY_COLOR**: Primary color for the UI (hex format, e.g., `#4f9eff`)
 - **NEXT_PUBLIC_SECONDARY_COLOR**: Secondary color for the UI (hex format, e.g., `#1a1f36`)
 
+## Dependencies
+
+This template imports `@craft/stellar` from `src/lib/config.ts`. The dependency is
+declared in `package.json` with a published version range (not a private
+`workspace:*` link) so the generated public repository installs cleanly.
+
 ## Soroban Integration
 
 This template uses Soroban RPC to interact with smart contracts on the Stellar network. Its `src/lib/config.ts` exposes a `contracts` object for platform-provided smart contract addresses.

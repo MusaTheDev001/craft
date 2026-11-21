@@ -2,7 +2,26 @@ openapi: 3.0.3
 info:
   title: Craft API
   version: 1.0.0
-  description: API for the Craft application
+  description: |
+    API for the Craft application.
+
+    ## Request size limits
+
+    All request size limits are enforced server-side; clients cannot bypass them.
+    Requests exceeding a limit are rejected with `413 Payload Too Large`.
+    Default limits (see `validate-request-size.ts`):
+
+    - `MAX_JSON_BODY_BYTES` — 1 MB (1,048,576 bytes) for JSON request bodies
+    - `MAX_MULTIPART_BODY_BYTES` — 10 MB (10,485,760 bytes) for multipart/form-data bodies
+    - `MAX_URL_LENGTH` — 2,048 characters for request URLs
+    - `MAX_HEADER_BYTES` — 16 KB (16,384 bytes) for request headers
+
+    ## Branding upload constraints
+
+    Branding asset uploads are limited to 2 MB (`MAX_BRANDING_UPLOAD_BYTES`).
+    Accepted file types: `image/png`, `image/jpeg`, `image/svg+xml`, `image/webp`.
+    Uploads that exceed the size limit return `413`; uploads with an unsupported
+    file type or otherwise invalid payload return `422`.
 servers:
   - url: /api
     description: API base path
@@ -25,6 +44,60 @@ paths:
                   $ref: '#/components/schemas/Template'
         '401':
           description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /branding/upload:
+    post:
+      summary: Upload a branding asset
+      description: |
+        Uploads a branding asset (logo, favicon, etc.). The request body is
+        limited to 2 MB (`MAX_BRANDING_UPLOAD_BYTES`), enforced server-side.
+        Accepted file types: `image/png`, `image/jpeg`, `image/svg+xml`, `image/webp`.
+      operationId: uploadBrandingAsset
+      tags:
+        - Branding
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: Branding asset, max 2 MB. Accepted types - image/png, image/jpeg, image/svg+xml, image/webp.
+      responses:
+        '200':
+          description: Asset uploaded successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '413':
+          description: Payload too large - the upload exceeds the 2 MB branding limit (MAX_BRANDING_UPLOAD_BYTES).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422':
+          description: Unprocessable entity - unsupported file type or invalid upload payload.
           content:
             application/json:
               schema:
