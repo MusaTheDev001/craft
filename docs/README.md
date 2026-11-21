@@ -59,6 +59,18 @@ STRIPE_SECRET_KEY=your_stripe_key
 STRIPE_WEBHOOK_SECRET=your_webhook_secret
 ```
 
+### Runtime Limits
+
+- `IDEMPOTENCY_TTL_MS` – Time‑to‑live for idempotency entries (default: 60000 ms).
+- `IDEMPOTENCY_MAX_ENTRIES` – Maximum number of idempotency entries kept in memory (default: 1000).
+- `IDEMPOTENCY_SWEEP_MS` – Interval for sweeping expired idempotency entries (default: 300000 ms).
+- `RATE_LIMIT_SWEEP_INTERVAL` – Interval for cleaning up rate‑limit counters (default: 60000 ms).
+- `SHUTDOWN_DRAIN_TIMEOUT_MS` – Grace period for draining in‑flight requests on shutdown (default: 15000 ms).
+
+All values are expressed in **milliseconds**.
+
+Link to contributing reference: see [Contributing Guidelines](#contributing-guidelines).
+
 ---
 
 ## Project Structure
