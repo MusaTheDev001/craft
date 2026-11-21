@@ -93,6 +93,14 @@ CRON_SECRET=your_cron_secret
 ADMIN_USER_IDS=
 ```
 
+# Compliance
+# JSON configuration for asset compliance checks.
+# Provide a blocklist of issuer accounts and jurisdiction rules.
+# When unset, compliance checks are disabled (no warnings).
+COMPLIANCE_BLOCKLIST_JSON='[{"issuer":"GAAAAAAA...","reason":"Example blocked issuer"}]'
+COMPLIANCE_JURISDICTION_JSON='[{"jurisdiction":"US","blockedAssets":["TOKEN"]}]'
+# See docs/asset-validation-rules.md for details.
+
 See [RBAC & Admin Middleware](./rbac-admin-middleware.md) for details on admin role resolution.
 
 ---
