@@ -143,6 +143,68 @@ describe('Stellar Config — Snapshot Regression Tests (#540)', () => {
         });
     });
 
+    describe('NEXT_PUBLIC_SOROBAN_RPC_URL override handling (#1500)', () => {
+        const originalRpc = process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+
+        beforeEach(() => {
+            delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+        });
+
+        afterEach(() => {
+            if (originalRpc === undefined) {
+                delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+            } else {
+                process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = originalRpc;
+            }
+        });
+
+        const networks = ['testnet', 'mainnet'] as const;
+
+        const cases: Array<{
+            label: string;
+            value: string | undefined;
+            expectOverride: boolean;
+        }> = [
+            { label: 'https override', value: 'https://rpc.example.com', expectOverride: true },
+            { label: 'unset override', value: undefined, expectOverride: false },
+            { label: 'empty string override', value: '', expectOverride: false },
+            { label: 'whitespace-only override', value: '   ', expectOverride: false },
+            { label: 'non-https override', value: 'http://rpc.example.com', expectOverride: false },
+        ];
+
+        it.each(
+            networks.flatMap((network) =>
+                cases.map((testCase) => [network, testCase.label, testCase] as const)
+            )
+        )('should resolve Soroban RPC URL for %s with %s', (network, _label, testCase) => {
+            if (testCase.value === undefined) {
+                delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+            } else {
+                process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = testCase.value;
+            }
+
+            const config = getNetworkConfig(network);
+            const expected = testCase.expectOverride
+                ? testCase.value
+                : SOROBAN_RPC_URLS[network];
+
+            expect(config.sorobanRpcUrl).toBe(expected);
+        });
+
+        it.each(networks)(
+            'should resolve Soroban RPC URL via resolveStellarNetworkConfig for %s',
+            (network) => {
+                process.env.NEXT_PUBLIC_SOROBAN_RPC_URL = 'https://rpc.example.com';
+                const overridden = resolveStellarNetworkConfig(network);
+                expect(overridden.sorobanRpcUrl).toBe('https://rpc.example.com');
+
+                delete process.env.NEXT_PUBLIC_SOROBAN_RPC_URL;
+                const fallback = resolveStellarNetworkConfig(network);
+                expect(fallback.sorobanRpcUrl).toBe(SOROBAN_RPC_URLS[network]);
+            }
+        );
+    });
+
     describe('network passphrase override (#1417)', () => {
         const originalPassphrase = process.env.NEXT_PUBLIC_NETWORK_PASSPHRASE;
         const customPassphrase = 'Custom Network ; 2024';
