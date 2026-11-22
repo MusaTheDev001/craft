@@ -54,6 +54,78 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /cron/cleanup:
+    post:
+      summary: Run scheduled cleanup
+      description: |
+        Cron-only endpoint. Requires a Bearer token in the `Authorization`
+        header whose value matches the server's `CRON_SECRET` environment
+        variable. Authentication is enforced by `withCronAuth`; requests with a
+        missing or invalid token are rejected with `401`.
+      operationId: cronCleanup
+      tags:
+        - Cron
+      security:
+        - cronBearer: []
+      responses:
+        '200':
+          description: Cleanup completed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: |
+            Unauthorized - the `Authorization` header is missing, malformed, or
+            does not match `CRON_SECRET`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 'Unauthorized: invalid or missing cron signature'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /cron/notifications:
+    post:
+      summary: Dispatch scheduled notifications
+      description: |
+        Cron-only endpoint. Requires a Bearer token in the `Authorization`
+        header whose value matches the server's `CRON_SECRET` environment
+        variable. Authentication is enforced by `withCronAuth`; requests with a
+        missing or invalid token are rejected with `401`.
+      operationId: cronNotifications
+      tags:
+        - Cron
+      security:
+        - cronBearer: []
+      responses:
+        '200':
+          description: Notifications dispatched successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: |
+            Unauthorized - the `Authorization` header is missing, malformed, or
+            does not match `CRON_SECRET`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                error: 'Unauthorized: invalid or missing cron signature'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /branding/upload:
     post:
       summary: Upload a branding asset
@@ -109,6 +181,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
 components:
+  securitySchemes:
+    cronBearer:
+      type: http
+      scheme: bearer
+      bearerFormat: opaque
+      description: |
+        Cron authentication token. The value must match the server's
+        `CRON_SECRET` environment variable and is sent as
+        `Authorization: Bearer <CRON_SECRET>`. Enforced by the `withCronAuth`
+        middleware on every `/cron/*` route; missing or invalid tokens receive
+        `401 Unauthorized`. Never commit or expose a real secret.
   schemas:
     Template:
       type: object
